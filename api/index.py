@@ -125,3 +125,6 @@ def discounted_cash_flow(request: DCFRequest):
     )
     df = df.fillna("")
     return {"value_per_share": value_per_share, "df": df.to_dict(orient="records"), "cost_of_capital_components": cost_of_capital_components, "final_components": final_components}
+
+# Export handler for Vercel
+handler = app

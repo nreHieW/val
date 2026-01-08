@@ -26,9 +26,11 @@ export default async function TopCard({
   };
   date: string;
 }) {
-  const priceHistory = await getPriceHistory(ticker);
+  // const priceHistory = await getPriceHistory(ticker);
+  const priceHistory = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
   const currentPrice = priceHistory[priceHistory.length - 1];
   const startPrice = priceHistory[0];
+  // console.log(priceHistory);
   let value = 0;
   if (value_per_share) {
     value = calculateValue(value_per_share, currentPrice);

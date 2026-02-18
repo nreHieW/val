@@ -660,7 +660,7 @@ def main():
             if not r:
                 num_errors += 1
 
-    print(f"Number of errors: {num_errors}")
+    print(f"Number of errors: {num_errors} out of {len(tickers)} tickers")
     # Write all constants to the database
     db = client[os.getenv("MONGODB_DB_NAME")]["macro"]
     db.update_one(
@@ -687,7 +687,7 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
         db.update_one({"Ticker": ticker}, {"$set": dcf_inputs}, upsert=True)
         return True
     except Exception as e:
-        print(e)
+        print(f"Ticker {ticker} error: {e}")
         return False
 
 

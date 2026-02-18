@@ -19,7 +19,7 @@ export async function getPriceHistory(query: string) {
 export async function getDCFOutput(inputData: DCFInputData) {
   if (!inputData) return;
 
-  const response = await fetch(`${baseURL}/api/py/dcf`, {
+  const response = await fetch(`${baseURL}/api/dcf`, {
     
     cache: "no-store",
     method: "POST",

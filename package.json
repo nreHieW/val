@@ -3,12 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "fastapi-dev": "pip3 install -r requirements.txt && python3 -m uvicorn api.index:app --reload",
     "next-dev": "next dev",
-    "dev": "concurrently \"npm run next-dev\" \"npm run fastapi-dev\"",
+    "dev": "bun run next-dev",
     "build": "next build && rm -rvf python/lib/python3.12/site-packages/pandas/tests",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "bun test",
+    "test:fixtures:python": "python3 tests/_python/generate_fixtures.py"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.4.2",

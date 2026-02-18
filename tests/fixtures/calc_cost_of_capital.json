@@ -1,0 +1,79 @@
+{
+  "cases": [
+    {
+      "name": "baseline",
+      "inputs": {
+        "interest_expense": 320000000.0,
+        "pre_tax_cost_of_debt": 0.052,
+        "average_maturity": 6,
+        "bv_debt": 9800000000.0,
+        "num_shares_outstanding": 980000000,
+        "curr_price": 172.4,
+        "unlevered_beta": 1.08,
+        "tax_rate": 0.21,
+        "risk_free_rate": 0.041,
+        "equity_risk_premium": 0.048
+      },
+      "output": {
+        "cost_of_capital": 0.09230247679516984,
+        "components": {
+          "cost_of_debt": 0.04108,
+          "cost_of_equity": 0.09498371160161223,
+          "levered_beta": 1.1246606583669214,
+          "risk_free_rate": 0.041,
+          "equity_risk_premium": 0.048
+        }
+      }
+    },
+    {
+      "name": "higher_leverage",
+      "inputs": {
+        "interest_expense": 980000000.0,
+        "pre_tax_cost_of_debt": 0.081,
+        "average_maturity": 8,
+        "bv_debt": 27000000000.0,
+        "num_shares_outstanding": 620000000,
+        "curr_price": 81.7,
+        "unlevered_beta": 0.92,
+        "tax_rate": 0.25,
+        "risk_free_rate": 0.038,
+        "equity_risk_premium": 0.061
+      },
+      "output": {
+        "cost_of_capital": 0.09659632483428612,
+        "components": {
+          "cost_of_debt": 0.06075,
+          "cost_of_equity": 0.11081345529816417,
+          "levered_beta": 1.1936632016092488,
+          "risk_free_rate": 0.038,
+          "equity_risk_premium": 0.061
+        }
+      }
+    },
+    {
+      "name": "low_debt_profile",
+      "inputs": {
+        "interest_expense": 40000000.0,
+        "pre_tax_cost_of_debt": 0.034,
+        "average_maturity": 4,
+        "bv_debt": 1200000000.0,
+        "num_shares_outstanding": 2100000000,
+        "curr_price": 55.2,
+        "unlevered_beta": 1.15,
+        "tax_rate": 0.19,
+        "risk_free_rate": 0.037,
+        "equity_risk_premium": 0.05
+      },
+      "output": {
+        "cost_of_capital": 0.09429164471778945,
+        "components": {
+          "cost_of_debt": 0.027540000000000005,
+          "cost_of_equity": 0.09498095941642865,
+          "levered_beta": 1.159619188328573,
+          "risk_free_rate": 0.037,
+          "equity_risk_premium": 0.05
+        }
+      }
+    }
+  ]
+}

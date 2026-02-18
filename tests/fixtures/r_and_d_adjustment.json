@@ -1,0 +1,57 @@
+{
+  "cases": [
+    {
+      "name": "five_year_history",
+      "expenses": [
+        520.0,
+        470.0,
+        420.0,
+        390.0,
+        350.0,
+        310.0
+      ],
+      "output": {
+        "adjustment": 132.0,
+        "unamortized_amount": 1374.0
+      }
+    },
+    {
+      "name": "declining_spend",
+      "expenses": [
+        180.0,
+        160.0,
+        145.0,
+        130.0
+      ],
+      "output": {
+        "adjustment": 35.0,
+        "unamortized_amount": 335.0
+      }
+    },
+    {
+      "name": "flat_spend",
+      "expenses": [
+        100.0,
+        100.0,
+        100.0,
+        100.0,
+        100.0
+      ],
+      "output": {
+        "adjustment": 0.0,
+        "unamortized_amount": 250.0
+      }
+    },
+    {
+      "name": "minimal_valid_length",
+      "expenses": [
+        120.0,
+        70.0
+      ],
+      "output": {
+        "adjustment": 50.0,
+        "unamortized_amount": 120.0
+      }
+    }
+  ]
+}

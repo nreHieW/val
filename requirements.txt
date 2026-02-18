@@ -1,6 +1,0 @@
-pandas==1.5.3
-numpy
-requests
-yfinance==0.2.38
-fastapi
-pydantic

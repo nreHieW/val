@@ -1,0 +1,28 @@
+name: scrape_stocks
+on:
+  schedule:
+    - cron: '0 21 * * 1-5' # 9pm UTC Monday-Friday
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: scraper/
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Run the scraping script for dcf
+        env: 
+          MONGODB_USERNAME: ${{ secrets.MONGODB_USERNAME }}
+          MONGODB_DB_PASSWORD: ${{ secrets.MONGODB_DB_PASSWORD }}
+          MONGODB_DB_NAME: ${{ secrets.MONGODB_DB_NAME }}
+        run: uv run main.py
+
+      

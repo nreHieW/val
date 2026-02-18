@@ -380,7 +380,7 @@ def get_revenue_forecasts(url):
             indiv = indiv.iloc[:, curr_year_index:].astype(float)
             growth = indiv.pct_change(axis=1)
             revenue_growth_rate_next_year, compounded_annual_revenue_growth_rate = growth.values[0][1], growth.values[0, 1:].mean()
-            ebit = income_statement.loc[["EBIT"]].iloc[0, curr_year_index:].apply(lambda x: int(x))
+            ebit = income_statement.loc[["EBIT"]].iloc[0, curr_year_index:].apply(lambda x: float(x))
 
             op_margins = ebit / indiv
             op_margin_next_year = op_margins[[str(curr_year + 2)]].iloc[0].values[0]  # MarketScreener has some inconsistencies of EBIT values versus yahoo finance

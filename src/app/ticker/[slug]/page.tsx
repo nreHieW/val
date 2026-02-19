@@ -4,15 +4,16 @@ import type { Metadata, ResolvingMetadata } from "next";
 import { Suspense } from "react";
 
 type Props = {
-  params: { slug: string };
-  searchParams: { [key: string]: string | string[] | undefined };
+  params: Promise<{ slug: string }>;
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 };
 
 export async function generateMetadata(
-  { params, searchParams }: Props,
-  parent: ResolvingMetadata
+  { params }: Props,
+  _parent: ResolvingMetadata
 ): Promise<Metadata> {
-  const ticker = params.slug.split("-")[0];
+  const { slug } = await params;
+  const ticker = slug.split("-")[0];
 
   return {
     title: `val. ${ticker}`,
@@ -20,15 +21,17 @@ export async function generateMetadata(
   };
 }
 
-export default function TickerDisplayPage({
+export default async function TickerDisplayPage({
   params,
   searchParams,
-}: {
-  params: { slug: string };
-  searchParams: { [key: string]: string | string[] | undefined };
-}) {
-  const ticker = params.slug.split("-")[0];
-  const inputs = (searchParams.inputs as string) || "";
+}: Props) {
+  const [{ slug }, resolvedSearchParams] = await Promise.all([
+    params,
+    searchParams,
+  ]);
+  const ticker = slug.split("-")[0];
+  const inputsParam = resolvedSearchParams.inputs;
+  const inputs = Array.isArray(inputsParam) ? inputsParam[0] ?? "" : inputsParam ?? "";
 
   return (
     <>

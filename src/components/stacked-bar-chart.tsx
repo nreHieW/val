@@ -33,6 +33,25 @@ const lightColors = [
   "rgba(0, 180, 216,1)",
   "rgba(0, 119, 182,1)",
 ];
+
+function formatTooltipCurrency(value: number): string {
+  const absoluteValue = Math.abs(value);
+
+  if (absoluteValue >= 1e9) {
+    return `$${(value / 1e9).toFixed(2)}B`;
+  }
+
+  if (absoluteValue >= 1e6) {
+    return `$${(value / 1e6).toFixed(2)}M`;
+  }
+
+  if (absoluteValue >= 1e3) {
+    return `$${(value / 1e3).toFixed(2)}K`;
+  }
+
+  return `$${value.toFixed(2)}`;
+}
+
 function StackedBarChart({ data, labels }: BarChartProps) {
   const { resolvedTheme } = useTheme();
   const sumLabel = {
@@ -69,6 +88,17 @@ function StackedBarChart({ data, labels }: BarChartProps) {
 
   const options = {
     responsive: true,
+    plugins: {
+      tooltip: {
+        callbacks: {
+          label: (context: any) => {
+            const label = context.dataset.label ?? "";
+            const value = Number(context.raw ?? 0);
+            return `${label}: ${formatTooltipCurrency(value)}`;
+          },
+        },
+      },
+    },
     scales: {
       x: {
         stacked: true,

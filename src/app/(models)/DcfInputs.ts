@@ -5,11 +5,20 @@ export interface IInput extends Document {
 }
 
 const dcfInputSchema: Schema = new Schema({
+    Ticker: {
+        type: String,
+    },
+    name: {
+        type: String,
+    },
     data: {
         type: Schema.Types.Mixed,
-        required: true,
+        required: false,
     },
 });
+
+dcfInputSchema.index({ Ticker: 1 });
+dcfInputSchema.index({ name: 1 });
 
 
 const DCFInput = mongoose.models.dcf_inputs || mongoose.model<IInput>('dcf_inputs', dcfInputSchema); // This is also a singleton so need to check if exists first

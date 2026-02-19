@@ -16,7 +16,7 @@ export default function Home() {
         <div className={`${poppins.className} align-text-bottom pt-12 text-xl`}>
           Value any company.
         </div>
-        <div className=" w-3/5 pt-6">
+        <div className="w-3/5 min-w-0 pt-6">
           <SearchBar />
         </div>
         <div className="text-xs underline mt-12" style={{ opacity: "50%" }}>

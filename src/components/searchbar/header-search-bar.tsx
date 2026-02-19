@@ -39,7 +39,7 @@ export default function HeaderSearchBar() {
           </div>
         )}
       </div>
-      <div className="align-baseline mx-auto hidden sm:block absolute top-11 rounded" style={{right: "30vw", maxWidth:"20vw"}}>
+      <div className="align-baseline mx-auto hidden sm:block absolute top-11 rounded min-w-0" style={{ right: "30vw", width: "20vw", maxWidth: "20vw" }}>
         <BaseSearchBar />
       </div>
     </div>
@@ -53,8 +53,8 @@ interface SearchItemProps {
 
 function SearchItem({ text, url }: SearchItemProps) {
   return (
-    <li className="pt-1 text-xs hover:dark:bg-zinc-700 hover:py-1 hover:rounded px-5 hover:bg-zinc-300 w-full">
-      <Link href={url} style={{ display: "inline-block" }}>
+    <li className="pt-1 text-xs hover:dark:bg-zinc-700 hover:py-1 hover:rounded px-5 hover:bg-zinc-300 w-full min-w-0">
+      <Link href={url} className="inline-block w-full truncate">
         {text}
       </Link>
     </li>
@@ -79,10 +79,20 @@ function BaseSearchBar() {
   }, [searchQuery]);
 
   useEffect(() => {
+    const controller = new AbortController();
     const getResults = async () => {
-      if (debouncedSearchQuery) {
-        setIsLoading(true);
-        let results: TickerResult[] = await getTickers(debouncedSearchQuery);
+      if (!debouncedSearchQuery) {
+        setItems([]);
+        setIsLoading(false);
+        return;
+      }
+
+      setIsLoading(true);
+      try {
+        let results: TickerResult[] = await getTickers(
+          debouncedSearchQuery,
+          controller.signal
+        );
         results = results.sort((a, b) => {
           if (a.Ticker.toLowerCase() === debouncedSearchQuery.toLowerCase())
             return -1;
@@ -91,10 +101,23 @@ function BaseSearchBar() {
           return 0;
         });
         setItems(results);
-        setIsLoading(false);
+      } catch (error) {
+        if ((error as DOMException).name !== "AbortError") {
+          console.error(error);
+          setItems([]);
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsLoading(false);
+        }
       }
     };
+
     getResults();
+
+    return () => {
+      controller.abort();
+    };
   }, [debouncedSearchQuery]);
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
@@ -110,10 +133,10 @@ function BaseSearchBar() {
     }
   };
   return (
-    <>
+    <div className="w-full min-w-0">
       <input
         type="text"
-        className="search w-full flex-1 py-2 px-4 dark:outline-zinc-300 outline outline-1 outline-zinc-800 text-xs dark:text-white rounded"
+        className="search w-full py-2 px-4 dark:outline-zinc-300 outline outline-1 outline-zinc-800 text-xs dark:text-white rounded"
         placeholder="Ticker Search..."
         value={searchQuery}
         spellCheck="false"
@@ -126,7 +149,7 @@ function BaseSearchBar() {
           <Loading />
         </div>
       ) : items.length > 0 && searchQuery.length > 0 ? (
-        <ul className="results-list flex-1 py-2 w-full max-h-64 overflow-auto scrollbar scrollbar-track-transparent dark:scrollbar-thumb-white scrollbar-thumb-black bg-slate-50 dark:bg-zinc-900">
+        <ul className="results-list py-2 w-full min-w-0 max-h-64 overflow-auto scrollbar scrollbar-track-transparent dark:scrollbar-thumb-white scrollbar-thumb-black bg-slate-50 dark:bg-zinc-900">
           {items.map((item: TickerResult, index) => {
             const ticker = item.Ticker;
             const name = item.name;
@@ -150,6 +173,6 @@ function BaseSearchBar() {
           <div className="text-center text-xs py-5">No results found</div>
         )
       )}
-    </>
+    </div>
   );
 }

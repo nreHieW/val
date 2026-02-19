@@ -10,11 +10,12 @@ export async function getDCFInputs(query: string) {
 }
 export async function getPriceHistory(query: string) {
   const response = await fetch(
-    `${baseURL}/api/py/history?ticker=${encodeURIComponent(query)}`, { next: { revalidate: 60 } }
+    `${baseURL}/api/history?ticker=${encodeURIComponent(query)}`,
+    { next: { revalidate: 60 } },
   );
   let data = await response.json();
 
-  return data.history;
+  return Array.isArray(data.history) ? data.history : [];
 }
 export async function getDCFOutput(inputData: DCFInputData) {
   if (!inputData) return;

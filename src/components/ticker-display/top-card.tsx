@@ -26,8 +26,10 @@ export default async function TopCard({
   };
   date: string;
 }) {
-  // const priceHistory = await getPriceHistory(ticker);
-  const priceHistory = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+  let priceHistory = await getPriceHistory(ticker);
+  if (!priceHistory || priceHistory.length < 2) {
+    priceHistory = [0, 0];
+  }
   const currentPrice = priceHistory[priceHistory.length - 1];
   const startPrice = priceHistory[0];
   // console.log(priceHistory);

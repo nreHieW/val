@@ -26,6 +26,8 @@ warnings.filterwarnings("ignore")
 headers = {"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.142 Safari/537.36"}
 
 MAX_WORKERS = 120
+REQUEST_TIMEOUT_SECONDS = 30
+TICKER_TIMEOUT_SECONDS = int(os.getenv("TICKER_TIMEOUT_SECONDS", "300"))
 CURRENCIES = {
     "ARS",
     "AUD",
@@ -61,7 +63,9 @@ CURRENCIES = {
 
 def setup_proxies():
     response = requests.get(
-        "https://www.sslproxies.org/", headers={"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.142 Safari/537.36"}
+        "https://www.sslproxies.org/",
+        headers={"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.142 Safari/537.36"},
+        timeout=REQUEST_TIMEOUT_SECONDS,
     )
 
     proxies = []
@@ -91,7 +95,7 @@ def fetch_html(url, retries=2, sleep_seconds=10, use_proxy=False):
     for attempt in range(retries):
         try:
             proxies = get_proxy() if use_proxy else None
-            return requests.get(url, headers=headers, proxies=proxies, timeout=30).text
+            return requests.get(url, headers=headers, proxies=proxies, timeout=REQUEST_TIMEOUT_SECONDS).text
         except Exception:
             if attempt < retries - 1:
                 time.sleep(sleep_seconds)
@@ -107,6 +111,27 @@ def get_htmls(urls, use_proxy=False):
             html_responses.extend(batch_htmls)
         time.sleep(1)
     return html_responses
+
+
+def run_with_timeout(func, timeout_seconds, *args, **kwargs):
+    result = {}
+    error = {}
+
+    def target():
+        try:
+            result["value"] = func(*args, **kwargs)
+        except Exception as e:
+            error["value"] = e
+
+    worker = threading.Thread(target=target, daemon=True)
+    worker.start()
+    worker.join(timeout_seconds)
+
+    if worker.is_alive():
+        raise TimeoutError(f"Timed out after {timeout_seconds} seconds")
+    if "value" in error:
+        raise error["value"]
+    return result.get("value")
 
 
 def get_all_tickers():
@@ -222,7 +247,6 @@ def get_regional_crps(revenues_by_region: dict, mapper: StringMapper, country_er
 def get_industry_beta(industry: str, sector: str, mapper: StringMapper, industry_betas: dict):
     industry_result, industry_score = mapper.get_closest_with_scores(industry)[0]
     sector_result, sector_score = mapper.get_closest_with_scores(sector)[0]
-    print(f"industry_result: {industry_result}, industry_score: {industry_score}, sector_result: {sector_result}, sector_score: {sector_score}")
     if (industry_score is None) and (sector_score is None):
         industry_result = "Grand Total"
         return industry_betas[industry_result], industry_result
@@ -235,7 +259,7 @@ def get_industry_beta(industry: str, sector: str, mapper: StringMapper, industry
 
 def get_10year_tbill():
     url = "https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol?symbols=US10Y&requestMethod=itv&noform=1&partnerId=2&fund=1&exthrs=1&output=json&events=1"
-    res = requests.get(url, headers=headers).json()
+    res = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS).json()
     raw = res['FormattedQuoteResult']['FormattedQuote'][0]['last']
     res = raw.replace("%", "")
     return float(res) / 100
@@ -339,7 +363,7 @@ def get_industry_avgs():
 
 def get_marketscreener_url(ticker, name: str = ""):
     search_url = "https://www.marketscreener.com/search/?q=" + "+".join(ticker.split())
-    page = requests.get(search_url, headers=headers)
+    page = requests.get(search_url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
     soup = BeautifulSoup(page.content, "lxml")
     rows = soup.find_all("tr")
     found_link = None
@@ -354,7 +378,7 @@ def get_marketscreener_url(ticker, name: str = ""):
 
     if not found_link and name:
         search_url = "https://www.marketscreener.com/search/?q=" + "+".join(name.split())
-        page = requests.get(search_url, headers=headers)
+        page = requests.get(search_url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
         soup = BeautifulSoup(page.content, "lxml")
         rows = soup.find_all("tr")
         for row in rows:
@@ -383,7 +407,7 @@ def get_marketscreener_url(ticker, name: str = ""):
 
 
 def get_revenue_by_region(ticker, url):
-    page = requests.get(url + "company/", headers=headers)
+    page = requests.get(url + "company/", headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
     soup = BeautifulSoup(page.content, "lxml")
     df = None
     for div in soup.find_all("div", {"class": "card mb-15 card--collapsible card--scrollable"}):
@@ -405,7 +429,7 @@ def get_revenue_by_region(ticker, url):
 
 
 def get_revenue_forecasts(url):
-    page = requests.get(url + "finances/", headers=headers)
+    page = requests.get(url + "finances/", headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
     soup = BeautifulSoup(page.content, features="lxml")
     for div in soup.find_all("div", {"class": "card card--collapsible mb-15"}):
         header_text = div.find("div", {"class": "card-header"}).text.lower()
@@ -432,12 +456,12 @@ def get_revenue_forecasts(url):
 def get_similar_stocks(ticker: str):
     url = f"https://www.tipranks.com/stocks/{ticker.lower()}/similar-stocks"
     try:
-        response = requests.get(url, headers=headers, proxies=get_proxy())
+        response = requests.get(url, headers=headers, proxies=get_proxy(), timeout=REQUEST_TIMEOUT_SECONDS)
     except:
         try:
-            response = requests.get(url, headers=headers, proxies=get_proxy())
+            response = requests.get(url, headers=headers, proxies=get_proxy(), timeout=REQUEST_TIMEOUT_SECONDS)
         except:
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
 
     soup = BeautifulSoup(response.text, "html.parser")
     return [x.text for x in soup.find_all("a", {"data-link": "stock"})]
@@ -445,7 +469,11 @@ def get_similar_stocks(ticker: str):
 
 def r_and_d_handler(ticker, industry):
     url = f"https://ycharts.com/companies/{ticker.upper()}/r_and_d_expense_ttm"
-    response = requests.get(url, headers={"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.142 Safari/537.36"})
+    response = requests.get(
+        url,
+        headers={"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.142 Safari/537.36"},
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
     soup = BeautifulSoup(response.text, "html.parser")
     htmls = soup.find_all("table")
     try:
@@ -886,11 +914,25 @@ def main():
 
 def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, db, fx_rates):
     try:
-        dcf_inputs = get_dcf_inputs(ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, fx_rates)
+        dcf_inputs = run_with_timeout(
+            get_dcf_inputs,
+            TICKER_TIMEOUT_SECONDS,
+            ticker,
+            country_erps,
+            region_mapper,
+            avg_metrics,
+            industry_mapper,
+            mature_erp,
+            risk_free_rate,
+            fx_rates,
+        )
         dcf_inputs = json.dumps(dcf_inputs, cls=CustomEncoder)
         dcf_inputs = json.loads(dcf_inputs)
         db.update_one({"Ticker": ticker}, {"$set": dcf_inputs}, upsert=True)
         return True
+    except TimeoutError:
+        print(f"Ticker {ticker} timed out after {TICKER_TIMEOUT_SECONDS} seconds")
+        return False
     except Exception as e:
         print(f"Ticker {ticker} error: {e}")
         return False

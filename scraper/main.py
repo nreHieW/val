@@ -134,7 +134,7 @@ class CustomEncoder(json.JSONEncoder):
 
 
 class StringMapper:
-    def __init__(self, gts: list, threshold=0.85):
+    def __init__(self, gts: list, threshold=0):
         self.model = SentenceTransformer("Alibaba-NLP/gte-base-en-v1.5", trust_remote_code=True)
         self.gts = gts
         self.embeddings = self.model.encode(gts)
@@ -219,11 +219,18 @@ def get_regional_crps(revenues_by_region: dict, mapper: StringMapper, country_er
     return sum([x * y for x, y in zip(crps, weights)]), {final_mappings[region]: v for region, v in revenues_by_region.items()}
 
 
-def get_industry_beta(industry: str, mapper: StringMapper, industry_betas: dict):
-    industry = mapper.get_closest(industry)[0]
-    if industry is None:
-        industry = "Grand Total"
-    return industry_betas[industry], industry
+def get_industry_beta(industry: str, sector: str, mapper: StringMapper, industry_betas: dict):
+    industry_result, industry_score = mapper.get_closest_with_scores(industry)[0]
+    sector_result, sector_score = mapper.get_closest_with_scores(sector)[0]
+    print(f"industry_result: {industry_result}, industry_score: {industry_score}, sector_result: {sector_result}, sector_score: {sector_score}")
+    if (industry_score is None) and (sector_score is None):
+        industry_result = "Grand Total"
+        return industry_betas[industry_result], industry_result
+
+    if industry_score > sector_score:
+        return industry_betas[industry_result], industry_result
+    else:
+        return industry_betas[sector_result], sector_result
 
 
 def get_10year_tbill():
@@ -415,7 +422,7 @@ def get_revenue_forecasts(url):
             indiv = indiv.iloc[:, curr_year_index:].astype(float)
             growth = indiv.pct_change(axis=1)
             revenue_growth_rate_next_year, compounded_annual_revenue_growth_rate = growth.values[0][1], growth.values[0, 1:].mean()
-            ebit = income_statement.loc[["EBIT"]].iloc[0, curr_year_index:].apply(lambda x: float(x))
+            ebit = income_statement.loc[["EBIT"]].iloc[0, curr_year_index:].apply(lambda x: 0 if x != "-" else float(x))
 
             op_margins = ebit / indiv
             op_margin_next_year = op_margins[[str(curr_year + 2)]].iloc[0].values[0]  # MarketScreener has some inconsistencies of EBIT values versus yahoo finance
@@ -594,8 +601,9 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     regions = region_mapper.get_closest(info["country"])
 
     industry = info["industry"]
+    sector = info["sector"]
     avg_betas = avg_metrics["Unlevered Beta"]
-    unlevered_beta, industry = get_industry_beta(industry, industry_mapper, avg_betas)
+    unlevered_beta, industry = get_industry_beta(industry, sector, industry_mapper, avg_betas)
     marketscreener_url = get_marketscreener_url(info["symbol"], info["shortName"])
 
     regional_revenues = get_revenue_by_region(info["symbol"], marketscreener_url)
@@ -808,7 +816,7 @@ def run_dcf_scrape(tickers, client):
     region_mapper = StringMapper(list(country_erps.keys()))
     avg_metrics = get_industry_avgs()
     avg_betas = avg_metrics["Unlevered Beta"]
-    industry_mapper = StringMapper(list(avg_betas.keys()), threshold=0.7)
+    industry_mapper = StringMapper(list(avg_betas.keys()))
     risk_free_rate = get_10year_tbill()
     mature_erp = get_mature_erp()
     fx_rates = get_exchange_rates()
@@ -872,6 +880,7 @@ def main():
     print("Number of tickers:", len(tickers))
     client = get_mongo_client()
     run_dcf_scrape(tickers, client)
+    print("Running comps scrape")
     run_comps_scrape(tickers, client)
 
 

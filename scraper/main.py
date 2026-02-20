@@ -81,8 +81,43 @@ PROXIES = setup_proxies()
 
 
 def get_proxy():
+    if len(PROXIES) == 0:
+        return None
     idx = np.random.randint(0, len(PROXIES))
     return {"http": PROXIES[idx], "https": PROXIES[idx]}
+
+
+def fetch_html(url, retries=2, sleep_seconds=10, use_proxy=False):
+    for attempt in range(retries):
+        try:
+            proxies = get_proxy() if use_proxy else None
+            return requests.get(url, headers=headers, proxies=proxies, timeout=30).text
+        except Exception:
+            if attempt < retries - 1:
+                time.sleep(sleep_seconds)
+    return ""
+
+
+def get_htmls(urls, use_proxy=False):
+    html_responses = []
+    for i in range(0, len(urls), MAX_WORKERS):
+        batch = urls[i : i + MAX_WORKERS]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            batch_htmls = list(executor.map(lambda u: fetch_html(u, use_proxy=use_proxy), batch))
+            html_responses.extend(batch_htmls)
+        time.sleep(1)
+    return html_responses
+
+
+def get_all_tickers():
+    url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
+    response = requests.get(url, timeout=30)
+    return [ticker for ticker in response.text.split("\n") if ticker]
+
+
+def get_mongo_client():
+    uri = f"mongodb+srv://{os.getenv('MONGODB_USERNAME')}:{os.getenv('MONGODB_DB_PASSWORD')}@{os.getenv('MONGODB_DB_NAME')}.kdnx4hj.mongodb.net/?retryWrites=true&w=majority&appName={os.getenv('MONGODB_DB_NAME')}"
+    return MongoClient(uri, server_api=ServerApi("1"))
 
 
 # https://stackoverflow.com/questions/30098263/inserting-a-document-with-pymongo-invaliddocument-cannot-encode-object
@@ -624,14 +659,151 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     }
 
 
-def main():
-    url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
-    response = requests.get(url)
-    file_content = response.text
-    tickers = file_content.split("\n")
-    print("Number of tickers:", len(tickers))
-    # tickers = ["BABA"]
+def get_marketscreener_links(tickers):
+    links = {}
 
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(get_marketscreener_url, ticker): ticker for ticker in tickers}
+        for future in concurrent.futures.as_completed(futures):
+            ticker = futures[future]
+            try:
+                link = future.result()
+                if not link:
+                    continue
+                if not link.endswith("/"):
+                    link += "/"
+                links[ticker] = link + "finances/"
+            except Exception:
+                continue
+
+    return links
+
+
+def parse_marketscreener(marketscreener_urls):
+    if not marketscreener_urls:
+        return pd.DataFrame()
+
+    htmls = get_htmls(list(marketscreener_urls.values()))
+    htmls = dict(zip(marketscreener_urls.keys(), htmls))
+    dfs = []
+
+    for ticker, html in htmls.items():
+        if not html:
+            continue
+        try:
+            soup = BeautifulSoup(html, features="lxml")
+            for div in soup.find_all("div", {"class": "card card--collapsible mb-15"}):
+                header = div.find("div", {"class": "card-header"})
+                if not header:
+                    continue
+                header_text = header.text.lower()
+                if "income statement" not in header_text:
+                    continue
+
+                income_statement = pd.read_html(StringIO(str(div.find("table"))))[0]
+                income_statement = income_statement.dropna(axis=1, how="all")
+                first_col = income_statement.columns[0]
+                income_statement[first_col] = income_statement[first_col].astype(str).str.replace(r"\d", "", regex=True).str.strip()
+                income_statement.set_index(first_col, inplace=True)
+                income_statement.index = income_statement.index.str.strip()
+                if income_statement.index.has_duplicates:
+                    income_statement = income_statement.groupby(level=0).first()
+                income_statement = income_statement.reindex(["Net sales", "Net income", "EBITDA", "EBIT"]).fillna(0)
+                indiv = income_statement.stack()
+                indiv.index = [" ".join(x) for x in indiv.index]
+                indiv = indiv.to_frame().T
+
+                superscript = div.find("sup")
+                if superscript and superscript.attrs.get("title"):
+                    title = superscript.attrs["title"].strip().split()
+                    indiv["Currency"] = title[0] if len(title) > 0 else 0
+                    indiv["Unit"] = title[-1] if len(title) > 1 else 0
+                else:
+                    indiv["Currency"] = 0
+                    indiv["Unit"] = 0
+
+                indiv["Ticker"] = ticker
+                dfs.append(indiv)
+                break
+        except Exception as e:
+            print("[ERROR] Failed to parse Marketscreener", ticker, e)
+
+    if not dfs:
+        return pd.DataFrame()
+
+    marketscreener = pd.concat(dfs, axis=0, join="outer", ignore_index=True)
+    return marketscreener.reset_index(drop=True).fillna(0).set_index("Ticker")
+
+
+def get_info(ticker):
+    try:
+        ticker_info = yf.Ticker(ticker).info
+        return {
+            "Ticker": ticker,
+            "Name": ticker_info.get("longName"),
+            "Market Cap": ticker_info.get("marketCap"),
+            "Sector": ticker_info.get("sector"),
+            "Summary": ticker_info.get("longBusinessSummary"),
+            "Industry": ticker_info.get("industry"),
+            "Shares Outstanding": ticker_info.get("sharesOutstanding"),
+            "Institution Ownership": ticker_info.get("heldPercentInstitutions"),
+            "Price": ticker_info.get("currentPrice"),
+            "52-Week High": ticker_info.get("fiftyTwoWeekHigh"),
+            "52-Week Low": ticker_info.get("fiftyTwoWeekLow"),
+            "Enterprise Value": ticker_info.get("enterpriseValue"),
+            "Beta": ticker_info.get("beta"),
+        }
+    except Exception:
+        return {
+            "Ticker": ticker,
+            "Name": 0,
+            "Market Cap": 0,
+            "Sector": 0,
+            "Summary": 0,
+            "Industry": 0,
+            "Shares Outstanding": 0,
+            "Institution Ownership": 0,
+            "Price": 0,
+            "52-Week High": 0,
+            "52-Week Low": 0,
+            "Enterprise Value": 0,
+            "Beta": 0,
+        }
+
+
+def get_and_parse_yahoo(tickers):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        results = list(executor.map(get_info, tickers))
+
+    return pd.DataFrame(results).set_index("Ticker")
+
+
+def parse_finviz(tickers):
+    finviz_urls = ["https://finviz.com/quote.ashx?t=" + ticker for ticker in tickers]
+    htmls = get_htmls(finviz_urls)
+    perf_columns = ["Perf Week", "Perf Month", "Perf Quarter", "Perf Half Y", "Perf Year", "Perf YTD"]
+    dfs = []
+
+    for i, html in enumerate(htmls):
+        try:
+            soup = BeautifulSoup(html, "lxml")
+            table = soup.find("table", class_="snapshot-table2")
+            if table:
+                df = pd.read_html(StringIO(str(table)))[0].iloc[:, -2:].set_index(10)
+                df[11] = df[11].astype(str).str.replace("%", "")
+                perf_values = df.loc[perf_columns].astype(float).T.reset_index(drop=True)
+                indiv = pd.DataFrame(perf_values, columns=perf_columns)
+            else:
+                indiv = pd.DataFrame([[0] * len(perf_columns)], columns=perf_columns)
+            indiv["Ticker"] = tickers[i]
+            dfs.append(indiv)
+        except Exception as e:
+            print("[ERROR] Failed to parse Finviz", tickers[i], e)
+
+    return pd.concat(dfs, axis=0, ignore_index=True).set_index("Ticker")
+
+
+def run_dcf_scrape(tickers, client):
     country_erps = get_country_erp()
     region_mapper = StringMapper(list(country_erps.keys()))
     avg_metrics = get_industry_avgs()
@@ -641,9 +813,8 @@ def main():
     mature_erp = get_mature_erp()
     fx_rates = get_exchange_rates()
 
-    uri = f"mongodb+srv://{os.getenv('MONGODB_USERNAME')}:{os.getenv('MONGODB_DB_PASSWORD')}@{os.getenv('MONGODB_DB_NAME')}.kdnx4hj.mongodb.net/?retryWrites=true&w=majority&appName={os.getenv('MONGODB_DB_NAME')}"
-    client = MongoClient(uri, server_api=ServerApi("1"))
-    db = client[os.getenv("MONGODB_DB_NAME")]["dcf_inputs"]
+    db_name = os.getenv("MONGODB_DB_NAME")
+    dcf_db = client[db_name]["dcf_inputs"]
     num_errors = 0
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -651,19 +822,17 @@ def main():
         for i, ticker in enumerate(tickers):
             if i > 0 and i % MAX_WORKERS == 0:
                 time.sleep(1)
-            future = executor.submit(process_ticker, ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, db, fx_rates)
+            future = executor.submit(process_ticker, ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, dcf_db, fx_rates)
             futures.append(future)
 
         for future in concurrent.futures.as_completed(futures):
-            # try:
-            r = future.result()
-            if not r:
+            if not future.result():
                 num_errors += 1
 
-    print(f"Number of errors: {num_errors} out of {len(tickers)} tickers")
-    # Write all constants to the database
-    db = client[os.getenv("MONGODB_DB_NAME")]["macro"]
-    db.update_one(
+    print(f"Number of DCF errors: {num_errors} out of {len(tickers)} tickers")
+
+    macro_db = client[db_name]["macro"]
+    macro_db.update_one(
         filter={},
         update={
             "$set": {
@@ -677,6 +846,33 @@ def main():
         },
         upsert=True,
     )
+
+
+def run_comps_scrape(tickers, client):
+    found_links = get_marketscreener_links(tickers)
+    marketscreener_df = parse_marketscreener(found_links)
+    yahoo_df = get_and_parse_yahoo(tickers)
+    finviz_df = parse_finviz(tickers)
+
+    combined = pd.concat([yahoo_df, marketscreener_df, finviz_df], axis=1, join="outer")
+    combined = combined.fillna(0)
+    combined.reset_index(inplace=True)
+    combined = combined.rename(columns={"index": "Ticker"})
+    combined.sort_values("Ticker", inplace=True)
+
+    db = client[os.getenv("MONGODB_DB_NAME")]["financials"]
+    data = combined.to_dict(orient="records")
+    data = json.loads(json.dumps(data, cls=CustomEncoder))
+    for record in data:
+        db.update_one({"Ticker": record["Ticker"]}, {"$set": record}, upsert=True)
+
+
+def main():
+    tickers = get_all_tickers()
+    print("Number of tickers:", len(tickers))
+    client = get_mongo_client()
+    run_dcf_scrape(tickers, client)
+    run_comps_scrape(tickers, client)
 
 
 def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, db, fx_rates):

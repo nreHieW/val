@@ -102,11 +102,11 @@ def fetch_html(url, retries=2, sleep_seconds=10, use_proxy=False):
     return ""
 
 
-def get_htmls(urls, use_proxy=False):
+def get_htmls(urls, use_proxy=False, workers=MAX_WORKERS):
     html_responses = []
-    for i in range(0, len(urls), MAX_WORKERS):
-        batch = urls[i : i + MAX_WORKERS]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    for i in range(0, len(urls), workers):
+        batch = urls[i : i + workers]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             batch_htmls = list(executor.map(lambda u: fetch_html(u, use_proxy=use_proxy), batch))
             html_responses.extend(batch_htmls)
         time.sleep(1)
@@ -816,7 +816,7 @@ def get_and_parse_yahoo(tickers):
 
 def parse_finviz(tickers):
     finviz_urls = ["https://finviz.com/quote.ashx?t=" + ticker for ticker in tickers]
-    htmls = get_htmls(finviz_urls)
+    htmls = get_htmls(finviz_urls, workers=10)
     perf_columns = ["Perf Week", "Perf Month", "Perf Quarter", "Perf Half Y", "Perf Year", "Perf YTD"]
     dfs = []
 

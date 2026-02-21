@@ -600,7 +600,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     ttm_income_statement = q_income_statement[q_income_statement.columns[:4]].T.fillna(0)
     last_balance_sheet = ticker.quarterly_balance_sheet
     last_balance_sheet = last_balance_sheet[last_balance_sheet.columns[:4]].T.ffill().bfill()
-    info = ticker.info
+    info = ticker.get_info()
     name = info.get("longName")
     curr_currency = info.get("financialCurrency")
     if curr_currency:
@@ -642,7 +642,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
 
     target_pre_tax_operating_margin = avg_metrics["Pre-tax Operating Margin (Unadjusted)"][industry]
 
-    operating_margin_this_year = ticker.info.get("operatingMargins", ttm_income_statement["Operating Income"].sum() / revenues)
+    operating_margin_this_year = info.get("operatingMargins", ttm_income_statement["Operating Income"].sum() / revenues)
 
     revenue_growth_rate_next_year, compounded_annual_revenue_growth_rate, operating_margin_next_year = get_revenue_forecasts(marketscreener_url)
     operating_margin_next_year = max(operating_margin_next_year, operating_margin_this_year)
@@ -772,40 +772,22 @@ def parse_marketscreener(marketscreener_urls):
 
 
 def get_info(ticker):
-    try:
-        ticker_info = yf.Ticker(ticker).info
-        return {
-            "Ticker": ticker,
-            "Name": ticker_info.get("longName"),
-            "Market Cap": ticker_info.get("marketCap"),
-            "Sector": ticker_info.get("sector"),
-            "Summary": ticker_info.get("longBusinessSummary"),
-            "Industry": ticker_info.get("industry"),
-            "Shares Outstanding": ticker_info.get("sharesOutstanding"),
-            "Institution Ownership": ticker_info.get("heldPercentInstitutions"),
-            "Price": ticker_info.get("currentPrice"),
-            "52-Week High": ticker_info.get("fiftyTwoWeekHigh"),
-            "52-Week Low": ticker_info.get("fiftyTwoWeekLow"),
-            "Enterprise Value": ticker_info.get("enterpriseValue"),
-            "Beta": ticker_info.get("beta"),
-        }
-    except Exception:
-        return {
-            "Ticker": ticker,
-            "Name": 0,
-            "Market Cap": 0,
-            "Sector": 0,
-            "Summary": 0,
-            "Industry": 0,
-            "Shares Outstanding": 0,
-            "Institution Ownership": 0,
-            "Price": 0,
-            "52-Week High": 0,
-            "52-Week Low": 0,
-            "Enterprise Value": 0,
-            "Beta": 0,
-        }
-
+    ticker_info = yf.Ticker(ticker).get_info()
+    return {
+        "Ticker": ticker,
+        "Name": ticker_info.get("longName"),
+        "Market Cap": ticker_info.get("marketCap"),
+        "Sector": ticker_info.get("sector"),
+        "Summary": ticker_info.get("longBusinessSummary"),
+        "Industry": ticker_info.get("industry"),
+        "Shares Outstanding": ticker_info.get("sharesOutstanding"),
+        "Institution Ownership": ticker_info.get("heldPercentInstitutions"),
+        "Price": ticker_info.get("currentPrice"),
+        "52-Week High": ticker_info.get("fiftyTwoWeekHigh"),
+        "52-Week Low": ticker_info.get("fiftyTwoWeekLow"),
+        "Enterprise Value": ticker_info.get("enterpriseValue"),
+        "Beta": ticker_info.get("beta"),
+    }
 
 def get_and_parse_yahoo(tickers):
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -816,7 +798,7 @@ def get_and_parse_yahoo(tickers):
 
 def parse_finviz(tickers):
     finviz_urls = ["https://finviz.com/quote.ashx?t=" + ticker for ticker in tickers]
-    htmls = get_htmls(finviz_urls, workers=10)
+    htmls = get_htmls(finviz_urls)
     perf_columns = ["Perf Week", "Perf Month", "Perf Quarter", "Perf Half Y", "Perf Year", "Perf YTD"]
     dfs = []
 
@@ -830,7 +812,7 @@ def parse_finviz(tickers):
                 perf_values = df.loc[perf_columns].astype(float).T.reset_index(drop=True)
                 indiv = pd.DataFrame(perf_values, columns=perf_columns)
             else:
-                indiv = pd.DataFrame([[0] * len(perf_columns)], columns=perf_columns)
+                raise ValueError("No table found for ticker: " + tickers[i])
             indiv["Ticker"] = tickers[i]
             dfs.append(indiv)
         except Exception as e:

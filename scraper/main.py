@@ -28,6 +28,10 @@ headers = {"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 MAX_WORKERS = 120
 REQUEST_TIMEOUT_SECONDS = 30
 TICKER_TIMEOUT_SECONDS = int(os.getenv("TICKER_TIMEOUT_SECONDS", "300"))
+YAHOO_MAX_WORKERS = int(os.getenv("YAHOO_MAX_WORKERS", "8"))
+YAHOO_MAX_RETRIES = int(os.getenv("YAHOO_MAX_RETRIES", "4"))
+YAHOO_BASE_BACKOFF_SECONDS = float(os.getenv("YAHOO_BASE_BACKOFF_SECONDS", "1.5"))
+YAHOO_BATCH_SLEEP_SECONDS = float(os.getenv("YAHOO_BATCH_SLEEP_SECONDS", "0.5"))
 CURRENCIES = {
     "ARS",
     "AUD",
@@ -771,8 +775,7 @@ def parse_marketscreener(marketscreener_urls):
     return marketscreener.reset_index(drop=True).fillna(0).set_index("Ticker")
 
 
-def get_info(ticker):
-    ticker_info = yf.Ticker(ticker).get_info()
+def _build_yahoo_record(ticker, ticker_info):
     return {
         "Ticker": ticker,
         "Name": ticker_info.get("longName"),
@@ -789,9 +792,35 @@ def get_info(ticker):
         "Beta": ticker_info.get("beta"),
     }
 
+
+def _empty_yahoo_record(ticker):
+    return _build_yahoo_record(ticker, {})
+
+
+def get_info(ticker):
+    for attempt in range(YAHOO_MAX_RETRIES):
+        try:
+            ticker_info = yf.Ticker(ticker).get_info()
+            return _build_yahoo_record(ticker, ticker_info if isinstance(ticker_info, dict) else {})
+        except Exception as e:
+            is_last_attempt = attempt == YAHOO_MAX_RETRIES - 1
+            if is_last_attempt:
+                print(f"[ERROR] Yahoo failed for {ticker} after {YAHOO_MAX_RETRIES} tries: {e}")
+                return _empty_yahoo_record(ticker)
+
+            backoff = YAHOO_BASE_BACKOFF_SECONDS * (2**attempt) + np.random.uniform(0, 0.5)
+            print(f"[WARN] Yahoo rate-limited/error for {ticker} (attempt {attempt + 1}/{YAHOO_MAX_RETRIES}): {e}. Retrying in {backoff:.2f}s")
+            time.sleep(backoff)
+
+
 def get_and_parse_yahoo(tickers):
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        results = list(executor.map(get_info, tickers))
+    results = []
+    for i in range(0, len(tickers), YAHOO_MAX_WORKERS):
+        batch = tickers[i : i + YAHOO_MAX_WORKERS]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_MAX_WORKERS) as executor:
+            results.extend(list(executor.map(get_info, batch)))
+        if i + YAHOO_MAX_WORKERS < len(tickers):
+            time.sleep(YAHOO_BATCH_SLEEP_SECONDS)
 
     return pd.DataFrame(results).set_index("Ticker")
 

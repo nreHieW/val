@@ -28,10 +28,6 @@ headers = {"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 MAX_WORKERS = 120
 REQUEST_TIMEOUT_SECONDS = 30
 TICKER_TIMEOUT_SECONDS = int(os.getenv("TICKER_TIMEOUT_SECONDS", "300"))
-YAHOO_MAX_WORKERS = int(os.getenv("YAHOO_MAX_WORKERS", "8"))
-YAHOO_MAX_RETRIES = int(os.getenv("YAHOO_MAX_RETRIES", "4"))
-YAHOO_BASE_BACKOFF_SECONDS = float(os.getenv("YAHOO_BASE_BACKOFF_SECONDS", "1.5"))
-YAHOO_BATCH_SLEEP_SECONDS = float(os.getenv("YAHOO_BATCH_SLEEP_SECONDS", "0.5"))
 CURRENCIES = {
     "ARS",
     "AUD",
@@ -605,6 +601,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     last_balance_sheet = ticker.quarterly_balance_sheet
     last_balance_sheet = last_balance_sheet[last_balance_sheet.columns[:4]].T.ffill().bfill()
     info = ticker.get_info()
+    yahoo_profile = build_yahoo_profile(info.get("symbol", ticker.ticker), info)
     name = info.get("longName")
     curr_currency = info.get("financialCurrency")
     if curr_currency:
@@ -658,44 +655,47 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     sales_to_capital_ratio_steady = avg_metrics["Sales/Capital"][industry]
     r_and_d_expenses = r_and_d_handler(info["symbol"], industry)
     return {
-        "name": name,
-        "revenues": revenues,
-        "operating_income": ttm_income_statement["Operating Income"].sum(),
-        "interest_expense": interest_expense,
-        "book_value_of_equity": book_value_of_equity,
-        "book_value_of_debt": book_value_of_debt,
-        "cash_and_marketable_securities": cash_and_marketable_securities,
-        "cross_holdings_and_other_non_operating_assets": cross_holdings_and_other_non_operating_assets,
-        "minority_interest": minority_interest,
-        "number_of_shares_outstanding": number_of_shares_outstanding,
-        "curr_price": curr_price,
-        "effective_tax_rate": effective_tax_rate,
-        "marginal_tax_rate": marginal_tax_rate,
-        "unlevered_beta": unlevered_beta,
-        "risk_free_rate": risk_free_rate,
-        "equity_risk_premium": equity_risk_premium,
-        "mature_erp": mature_erp,
-        "pre_tax_cost_of_debt": pre_tax_cost_of_debt,
-        "average_maturity": average_maturity,
-        "prob_of_failure": prob_of_failure,
-        "value_of_options": value_of_options,
-        "revenue_growth_rate_next_year": revenue_growth_rate_next_year,
-        "operating_margin_next_year": operating_margin_next_year,
-        "compounded_annual_revenue_growth_rate": compounded_annual_revenue_growth_rate,
-        "target_pre_tax_operating_margin": target_pre_tax_operating_margin,
-        "year_of_convergence_for_margin": year_of_convergence_for_margin,
-        "years_of_high_growth": years_of_high_growth,
-        "sales_to_capital_ratio_early": sales_to_capital_ratio_early,
-        "sales_to_capital_ratio_steady": sales_to_capital_ratio_steady,
-        "extras": {
-            "regional_revenues": regional_revenues,
-            "industry": industry,
-            "historical_revenue_growth": info.get("revenueGrowth", 0),
-            "mapped_regional_revenues": mapped_regional_revenues,
-            "similar_stocks": get_similar_stocks(info["symbol"]),
-            "research_and_development": r_and_d_expenses,
-            "last_updated_financials": ttm_income_statement.index[0].strftime("%Y-%m-%d"),
+        "dcf_inputs": {
+            "name": name,
+            "revenues": revenues,
+            "operating_income": ttm_income_statement["Operating Income"].sum(),
+            "interest_expense": interest_expense,
+            "book_value_of_equity": book_value_of_equity,
+            "book_value_of_debt": book_value_of_debt,
+            "cash_and_marketable_securities": cash_and_marketable_securities,
+            "cross_holdings_and_other_non_operating_assets": cross_holdings_and_other_non_operating_assets,
+            "minority_interest": minority_interest,
+            "number_of_shares_outstanding": number_of_shares_outstanding,
+            "curr_price": curr_price,
+            "effective_tax_rate": effective_tax_rate,
+            "marginal_tax_rate": marginal_tax_rate,
+            "unlevered_beta": unlevered_beta,
+            "risk_free_rate": risk_free_rate,
+            "equity_risk_premium": equity_risk_premium,
+            "mature_erp": mature_erp,
+            "pre_tax_cost_of_debt": pre_tax_cost_of_debt,
+            "average_maturity": average_maturity,
+            "prob_of_failure": prob_of_failure,
+            "value_of_options": value_of_options,
+            "revenue_growth_rate_next_year": revenue_growth_rate_next_year,
+            "operating_margin_next_year": operating_margin_next_year,
+            "compounded_annual_revenue_growth_rate": compounded_annual_revenue_growth_rate,
+            "target_pre_tax_operating_margin": target_pre_tax_operating_margin,
+            "year_of_convergence_for_margin": year_of_convergence_for_margin,
+            "years_of_high_growth": years_of_high_growth,
+            "sales_to_capital_ratio_early": sales_to_capital_ratio_early,
+            "sales_to_capital_ratio_steady": sales_to_capital_ratio_steady,
+            "extras": {
+                "regional_revenues": regional_revenues,
+                "industry": industry,
+                "historical_revenue_growth": info.get("revenueGrowth", 0),
+                "mapped_regional_revenues": mapped_regional_revenues,
+                "similar_stocks": get_similar_stocks(info["symbol"]),
+                "research_and_development": r_and_d_expenses,
+                "last_updated_financials": ttm_income_statement.index[0].strftime("%Y-%m-%d"),
+            },
         },
+        "yahoo_profile": yahoo_profile,
     }
 
 
@@ -775,7 +775,7 @@ def parse_marketscreener(marketscreener_urls):
     return marketscreener.reset_index(drop=True).fillna(0).set_index("Ticker")
 
 
-def _build_yahoo_record(ticker, ticker_info):
+def build_yahoo_profile(ticker, ticker_info):
     return {
         "Ticker": ticker,
         "Name": ticker_info.get("longName"),
@@ -793,36 +793,32 @@ def _build_yahoo_record(ticker, ticker_info):
     }
 
 
-def _empty_yahoo_record(ticker):
-    return _build_yahoo_record(ticker, {})
-
-
 def get_info(ticker):
-    for attempt in range(YAHOO_MAX_RETRIES):
-        try:
-            ticker_info = yf.Ticker(ticker).get_info()
-            return _build_yahoo_record(ticker, ticker_info if isinstance(ticker_info, dict) else {})
-        except Exception as e:
-            is_last_attempt = attempt == YAHOO_MAX_RETRIES - 1
-            if is_last_attempt:
-                print(f"[ERROR] Yahoo failed for {ticker} after {YAHOO_MAX_RETRIES} tries: {e}")
-                return _empty_yahoo_record(ticker)
-
-            backoff = YAHOO_BASE_BACKOFF_SECONDS * (2**attempt) + np.random.uniform(0, 0.5)
-            print(f"[WARN] Yahoo rate-limited/error for {ticker} (attempt {attempt + 1}/{YAHOO_MAX_RETRIES}): {e}. Retrying in {backoff:.2f}s")
-            time.sleep(backoff)
+    ticker_info = yf.Ticker(ticker).get_info()
+    return build_yahoo_profile(ticker, ticker_info)
 
 
-def get_and_parse_yahoo(tickers):
-    results = []
-    for i in range(0, len(tickers), YAHOO_MAX_WORKERS):
-        batch = tickers[i : i + YAHOO_MAX_WORKERS]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_MAX_WORKERS) as executor:
-            results.extend(list(executor.map(get_info, batch)))
-        if i + YAHOO_MAX_WORKERS < len(tickers):
-            time.sleep(YAHOO_BATCH_SLEEP_SECONDS)
+def get_and_parse_yahoo(tickers, cached_profiles=None):
+    cached_profiles = cached_profiles or {}
+    profiles_by_ticker = {}
 
-    return pd.DataFrame(results).set_index("Ticker")
+    for ticker in tickers:
+        cached_profile = cached_profiles.get(ticker)
+        if cached_profile:
+            profiles_by_ticker[ticker] = cached_profile
+
+    missing_tickers = [ticker for ticker in tickers if ticker not in profiles_by_ticker]
+    if missing_tickers:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            results = list(executor.map(get_info, missing_tickers))
+            for result in results:
+                profiles_by_ticker[result["Ticker"]] = result
+
+    ordered_profiles = [profiles_by_ticker[ticker] for ticker in tickers if ticker in profiles_by_ticker]
+    if not ordered_profiles:
+        return pd.DataFrame(columns=["Ticker"]).set_index("Ticker")
+
+    return pd.DataFrame(ordered_profiles).set_index("Ticker")
 
 
 def parse_finviz(tickers):
@@ -863,6 +859,7 @@ def run_dcf_scrape(tickers, client):
     db_name = os.getenv("MONGODB_DB_NAME")
     dcf_db = client[db_name]["dcf_inputs"]
     num_errors = 0
+    yahoo_profiles = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = []
@@ -873,8 +870,11 @@ def run_dcf_scrape(tickers, client):
             futures.append(future)
 
         for future in concurrent.futures.as_completed(futures):
-            if not future.result():
+            success, yahoo_profile = future.result()
+            if not success:
                 num_errors += 1
+            elif yahoo_profile:
+                yahoo_profiles[yahoo_profile["Ticker"]] = yahoo_profile
 
     print(f"Number of DCF errors: {num_errors} out of {len(tickers)} tickers")
 
@@ -893,12 +893,13 @@ def run_dcf_scrape(tickers, client):
         },
         upsert=True,
     )
+    return yahoo_profiles
 
 
-def run_comps_scrape(tickers, client):
+def run_comps_scrape(tickers, client, cached_yahoo_profiles=None):
     found_links = get_marketscreener_links(tickers)
     marketscreener_df = parse_marketscreener(found_links)
-    yahoo_df = get_and_parse_yahoo(tickers)
+    yahoo_df = get_and_parse_yahoo(tickers, cached_profiles=cached_yahoo_profiles)
     finviz_df = parse_finviz(tickers)
 
     combined = pd.concat([yahoo_df, marketscreener_df, finviz_df], axis=1, join="outer")
@@ -918,14 +919,14 @@ def main():
     tickers = get_all_tickers()
     print("Number of tickers:", len(tickers))
     client = get_mongo_client()
-    run_dcf_scrape(tickers, client)
+    yahoo_profiles = run_dcf_scrape(tickers, client)
     print("Running comps scrape")
-    run_comps_scrape(tickers, client)
+    run_comps_scrape(tickers, client, cached_yahoo_profiles=yahoo_profiles)
 
 
 def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, db, fx_rates):
     try:
-        dcf_inputs = run_with_timeout(
+        dcf_result = run_with_timeout(
             get_dcf_inputs,
             TICKER_TIMEOUT_SECONDS,
             ticker,
@@ -937,16 +938,16 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
             risk_free_rate,
             fx_rates,
         )
-        dcf_inputs = json.dumps(dcf_inputs, cls=CustomEncoder)
+        dcf_inputs = json.dumps(dcf_result["dcf_inputs"], cls=CustomEncoder)
         dcf_inputs = json.loads(dcf_inputs)
         db.update_one({"Ticker": ticker}, {"$set": dcf_inputs}, upsert=True)
-        return True
+        return True, dcf_result.get("yahoo_profile")
     except TimeoutError:
         print(f"Ticker {ticker} timed out after {TICKER_TIMEOUT_SECONDS} seconds")
-        return False
+        return False, None
     except Exception as e:
         print(f"Ticker {ticker} error: {e}")
-        return False
+        return False, None
 
 
 if __name__ == "__main__":

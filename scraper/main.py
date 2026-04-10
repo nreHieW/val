@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import yfinance as yf
+from yfinance.exceptions import YFRateLimitError
 import requests
 import re
 from bs4 import BeautifulSoup
@@ -26,6 +27,9 @@ warnings.filterwarnings("ignore")
 headers = {"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.142 Safari/537.36"}
 
 MAX_WORKERS = 120
+YAHOO_INFO_MAX_WORKERS = int(os.getenv("YAHOO_INFO_MAX_WORKERS", "8"))
+YAHOO_INFO_RETRIES = int(os.getenv("YAHOO_INFO_RETRIES", "4"))
+YAHOO_INFO_RETRY_SLEEP_SECONDS = float(os.getenv("YAHOO_INFO_RETRY_SLEEP_SECONDS", "5"))
 REQUEST_TIMEOUT_SECONDS = 30
 TICKER_TIMEOUT_SECONDS = int(os.getenv("TICKER_TIMEOUT_SECONDS", "300"))
 CURRENCIES = {
@@ -794,8 +798,21 @@ def build_yahoo_profile(ticker, ticker_info):
 
 
 def get_info(ticker):
-    ticker_info = yf.Ticker(ticker).get_info()
-    return build_yahoo_profile(ticker, ticker_info)
+    for attempt in range(YAHOO_INFO_RETRIES):
+        try:
+            ticker_info = yf.Ticker(ticker).get_info()
+            return build_yahoo_profile(ticker, ticker_info)
+        except YFRateLimitError:
+            if attempt == YAHOO_INFO_RETRIES - 1:
+                print(f"[ERROR] Yahoo rate limited for {ticker} after {YAHOO_INFO_RETRIES} attempts")
+                return None
+
+            sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1)
+            print(f"[WARN] Yahoo rate limited for {ticker}; retrying in {sleep_seconds:.1f}s")
+            time.sleep(sleep_seconds)
+        except Exception as e:
+            print(f"[ERROR] Failed to fetch Yahoo profile for {ticker}: {e}")
+            return None
 
 
 def get_and_parse_yahoo(tickers, cached_profiles=None):
@@ -809,10 +826,16 @@ def get_and_parse_yahoo(tickers, cached_profiles=None):
 
     missing_tickers = [ticker for ticker in tickers if ticker not in profiles_by_ticker]
     if missing_tickers:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            results = list(executor.map(get_info, missing_tickers))
+        for i in range(0, len(missing_tickers), YAHOO_INFO_MAX_WORKERS):
+            batch = missing_tickers[i : i + YAHOO_INFO_MAX_WORKERS]
+            with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_INFO_MAX_WORKERS) as executor:
+                results = list(executor.map(get_info, batch))
             for result in results:
-                profiles_by_ticker[result["Ticker"]] = result
+                if result:
+                    profiles_by_ticker[result["Ticker"]] = result
+
+            if i + YAHOO_INFO_MAX_WORKERS < len(missing_tickers):
+                time.sleep(1)
 
     ordered_profiles = [profiles_by_ticker[ticker] for ticker in tickers if ticker in profiles_by_ticker]
     if not ordered_profiles:

@@ -82,7 +82,7 @@ function InputForm({ defaults }: { defaults: UserDCFInputs }) {
   });
 
 
-  const fields: FieldValue[] = [
+  const essentialFields: FieldValue[] = [
     {
       displayLabel: "Revenues",
       key: "revenues",
@@ -102,22 +102,10 @@ function InputForm({ defaults }: { defaults: UserDCFInputs }) {
       decodeFn: (value: string) => parseFloat(value) / 100,
     },
     {
-      displayLabel: "Compounded Annual Revenue Growth %",
-      key: "compounded_annual_revenue_growth_rate",
-      tooltip: "Expected growth rate of revenue for the next 5 years.",
-      decodeFn: (value: string) => parseFloat(value) / 100,
-    },
-    {
       displayLabel: "Target Pre-tax Operating Margin",
       key: "target_pre_tax_operating_margin",
       tooltip: "Target pre-tax operating margin for the company",
       decodeFn: (value: string) => parseFloat(value) / 100,
-    },
-    {
-      displayLabel: "Year of Convergence for Margin",
-      key: "year_of_convergence_for_margin",
-      tooltip: "Number of years for the margin to converge to the target. (0-10)",
-      decodeFn: (value: string) => parseFloat(value),
     },
     {
       displayLabel: "Discount Rate %",
@@ -129,6 +117,21 @@ function InputForm({ defaults }: { defaults: UserDCFInputs }) {
       displayLabel: "Years of High Growth",
       key: "years_of_high_growth",
       tooltip: "How long before the company reaches steady state growth. (0-10)",
+      decodeFn: (value: string) => parseFloat(value),
+    },
+  ];
+
+  const advancedFields: FieldValue[] = [
+    {
+      displayLabel: "Compounded Annual Revenue Growth %",
+      key: "compounded_annual_revenue_growth_rate",
+      tooltip: "Expected growth rate of revenue for the next 5 years.",
+      decodeFn: (value: string) => parseFloat(value) / 100,
+    },
+    {
+      displayLabel: "Year of Convergence for Margin",
+      key: "year_of_convergence_for_margin",
+      tooltip: "Number of years for the margin to converge to the target. (0-10)",
       decodeFn: (value: string) => parseFloat(value),
     },
     {
@@ -160,11 +163,43 @@ function InputForm({ defaults }: { defaults: UserDCFInputs }) {
       decodeFn: (value: string) => parseFloat(value) * 1e6,
     },
   ];
+  const allFields = [...essentialFields, ...advancedFields];
+
+  function renderInputField(item: FieldValue) {
+    return (
+      <FormField
+        key={item.key}
+        control={form.control}
+        name={item.key as string}
+        render={({ field }) => (
+          <FormItem className="flex">
+            <FormLabel className="place-content-center pr-2 text-xs w-3/5">
+              {item.displayLabel}
+            </FormLabel>{" "}
+            <div className="pt-2 pr-8 ">
+              <InfoHover text={item.tooltip} />
+            </div>
+            <FormControl>
+              <div className="w-full pr-1">
+                <Input
+                  {...field}
+                  placeholder={formDefaults[item.key]?.toFixed(2)}
+                  value={field.value}
+                />
+                <FormMessage className="text-xs mt-1" />
+              </div>
+            </FormControl>
+          </FormItem>
+        )}
+      />
+    );
+  }
+
   function onSubmit(values: z.infer<typeof userDCFInputSchema>, e: any) {
     e.preventDefault();
     const newValues = { ...defaults, ...values };
     const encodedValues = Object.entries(newValues).map(([key, value]) => {
-      const field = fields.find((field) => field.key === key);
+      const field = allFields.find((field) => field.key === key);
       return [key, field ? field.decodeFn(String(value)) : value];
     });
     router.push(`?inputs=${encodeInputs(Object.fromEntries(encodedValues))}?`);
@@ -198,57 +233,45 @@ function InputForm({ defaults }: { defaults: UserDCFInputs }) {
                 className="flex flex-col space-y-2"
                 id="inputs"
               >
-                {fields.map((item: FieldValue, index) => {
-                  return (
-                    <FormField
-                      key={index}
-                      name={item.key as string}
-                      render={({ field }) => (
-                        <FormItem key={index} className="flex">
-                          <FormLabel className="place-content-center pr-2 text-xs w-3/5">
-                            {item.displayLabel}
-                          </FormLabel>{" "}
-                          <div className="pt-2 pr-8 ">
-                            <InfoHover text={item.tooltip} />
-                          </div>
-                          <FormControl>
-                            <div className="w-full pr-1">
-                              <Input
-                                {...field}
-                                placeholder={formDefaults[item.key]?.toFixed(2)}
-                                value={field.value}
-                              />
-                              <FormMessage className="text-xs mt-1" />
-                            </div>
-                          </FormControl>
-                        </FormItem>
+                {essentialFields.map((item: FieldValue) => renderInputField(item))}
+                <Accordion type="single" collapsible className="w-full">
+                  <AccordionItem value="advanced">
+                    <AccordionTrigger className="text-sm">
+                      Advanced
+                    </AccordionTrigger>
+                    <AccordionContent className="space-y-2 pt-1">
+                      {advancedFields.map((item: FieldValue) =>
+                        renderInputField(item),
                       )}
-                    />
-                  );
-                })}
-                  <FormField
-                    control={form.control}
-                    name="adjust_r_and_d"
-                    render={({ field }) => (
-                      <FormItem className="flex">
-                        <FormLabel className="place-content-center text-xs w-3/5 pr-1">
-                          Adjust R&D Expense
-                        </FormLabel>
-                        <div className="pt-1 pr-8">
-                          <InfoHover text={'Capitalize R and D expenses as assets. Used to determine sales/capital ratio'} />
-                        </div>
-                        <div className="w-full">
-                          <FormControl>
-                            <Switch
-                              checked={field.value}
-                              onCheckedChange={field.onChange}
-                            />
-                          </FormControl>
-                        </div>
-                    
-                      </FormItem>
-                    )}
-                  />
+                      <FormField
+                        control={form.control}
+                        name="adjust_r_and_d"
+                        render={({ field }) => (
+                          <FormItem className="flex">
+                            <FormLabel className="place-content-center text-xs w-3/5 pr-1">
+                              Adjust R&D Expense
+                            </FormLabel>
+                            <div className="pt-1 pr-8">
+                              <InfoHover
+                                text={
+                                  "Capitalize R and D expenses as assets. Used to determine sales/capital ratio"
+                                }
+                              />
+                            </div>
+                            <div className="w-full">
+                              <FormControl>
+                                <Switch
+                                  checked={field.value}
+                                  onCheckedChange={field.onChange}
+                                />
+                              </FormControl>
+                            </div>
+                          </FormItem>
+                        )}
+                      />
+                    </AccordionContent>
+                  </AccordionItem>
+                </Accordion>
                 <div className="self-end pt-3">
                   <Button
                     onClick={() => {

@@ -99,10 +99,19 @@ function InputForm({
   const sortedConsensusEntries = Object.entries(consensusRevenues).sort(
     ([leftYear], [rightYear]) => Number(leftYear) - Number(rightYear),
   );
+  const currentFiscalYear = forecastContext?.current_fiscal_year;
   const nextFiscalYear = forecastContext?.next_fiscal_year;
+  const currentFiscalYearConsensus = currentFiscalYear
+    ? consensusRevenues[currentFiscalYear]
+    : undefined;
   const nextFiscalYearConsensus = nextFiscalYear
     ? consensusRevenues[nextFiscalYear]
     : undefined;
+  const quartersReported = forecastContext?.quarters_reported;
+  const actualYtdRevenue = forecastContext?.actual_ytd_revenue;
+  const nextFiscalYearWeight = forecastContext?.next_fiscal_year_weight;
+  const bridgedNtmRevenue = forecastContext?.bridged_ntm_revenue;
+  const rollingNtmRevenues = forecastContext?.rolling_ntm_revenues ?? [];
   const postBridgeEntries = nextFiscalYear
     ? sortedConsensusEntries.filter(
         ([year]) => Number(year) >= Number(nextFiscalYear),
@@ -196,12 +205,27 @@ function InputForm({
   function renderForecastContext(key: NumericFieldKey) {
     if (
       key === "revenue_growth_rate_next_year" &&
-      nextFiscalYear &&
-      typeof nextFiscalYearConsensus === "number"
+      (typeof bridgedNtmRevenue === "number" || typeof nextFiscalYearConsensus === "number")
     ) {
       const segments = [
         `TTM Base: ${formatAmount(defaults.revenues, true)}`,
-        `Consensus FY${nextFiscalYear}: ${formatAmount(nextFiscalYearConsensus, true)}`,
+        currentFiscalYear &&
+        typeof currentFiscalYearConsensus === "number" &&
+        typeof actualYtdRevenue === "number"
+          ? `FY${currentFiscalYear} actual YTD: ${formatAmount(actualYtdRevenue, true)} / consensus: ${formatAmount(currentFiscalYearConsensus, true)}`
+          : null,
+        typeof quartersReported === "number"
+          ? `${quartersReported} quarter${quartersReported === 1 ? "" : "s"} reported`
+          : null,
+        nextFiscalYear && typeof nextFiscalYearConsensus === "number"
+          ? `FY${nextFiscalYear} consensus: ${formatAmount(nextFiscalYearConsensus, true)}`
+          : null,
+        typeof nextFiscalYearWeight === "number"
+          ? `Next FY weight in NTM: ${formatRate(nextFiscalYearWeight)}`
+          : null,
+        typeof bridgedNtmRevenue === "number"
+          ? `Bridged NTM: ${formatAmount(bridgedNtmRevenue, true)}`
+          : null,
         typeof forecastContext?.ms_growth_next_year === "number"
           ? `Raw FY growth: ${formatRate(forecastContext.ms_growth_next_year)}`
           : null,
@@ -211,6 +235,23 @@ function InputForm({
       return (
         <p className="pl-[62%] pr-1 text-[11px] text-muted-foreground/70">
           {segments.join(" | ")}
+        </p>
+      );
+    }
+
+    if (key === "compounded_annual_revenue_growth_rate" && rollingNtmRevenues.length > 0) {
+      const rollingPath = rollingNtmRevenues
+        .slice(0, 3)
+        .map((value, index) =>
+          index === 0
+            ? `NTM ${formatAmount(value, true)}`
+            : `NTM+${index} ${formatAmount(value, true)}`,
+        )
+        .join(" -> ");
+
+      return (
+        <p className="pl-[62%] pr-1 text-[11px] text-muted-foreground/70">
+          {`Rolling 12M path: ${rollingPath} | Default CAGR: ${formatRate(defaults.compounded_annual_revenue_growth_rate)}`}
         </p>
       );
     }

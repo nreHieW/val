@@ -20,7 +20,13 @@ export type UserDCFInputs = {
 export type ForecastContext = {
   consensus_revenues?: Record<string, number>;
   ms_growth_next_year?: number;
+  current_fiscal_year?: string | null;
   next_fiscal_year?: string;
+  quarters_reported?: number | null;
+  actual_ytd_revenue?: number | null;
+  next_fiscal_year_weight?: number | null;
+  bridged_ntm_revenue?: number | null;
+  rolling_ntm_revenues?: number[];
 };
 
 // Types required to create the DCF model

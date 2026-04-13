@@ -438,6 +438,7 @@ def get_revenue_forecasts(url):
         "compounded_annual_revenue_growth_rate": 0,
         "operating_margin_next_year": 0,
         "consensus_revenues": {},
+        "consensus_ebit": {},
         "currency": "",
         "unit": "",
     }
@@ -488,14 +489,21 @@ def get_revenue_forecasts(url):
             revenue_growth_rate_next_year = growth.values[0][1] if growth.shape[1] > 1 and pd.notna(growth.values[0][1]) else 0
             raw_compounded_growth_rates = [value for value in growth.values[0][1:] if pd.notna(value)]
             compounded_annual_revenue_growth_rate = float(np.mean(raw_compounded_growth_rates)) if raw_compounded_growth_rates else 0
-            ebit = income_statement.loc[["EBIT"]].iloc[0, curr_year_index:].apply(
-                lambda x: pd.to_numeric(str(x).replace(",", ""), errors="coerce")
-            )
+            ebit = pd.Series(dtype=float)
+            if "EBIT" in income_statement.index:
+                ebit = income_statement.loc["EBIT", indiv.columns].apply(
+                    lambda x: pd.to_numeric(str(x).replace(",", ""), errors="coerce")
+                )
+            consensus_ebit = {
+                str(column): float(value) * unit_multiplier
+                for column, value in ebit.items()
+                if pd.notna(value)
+            }
 
-            op_margins = ebit / indiv
+            op_margins = ebit / indiv if not ebit.empty else pd.DataFrame()
             op_margin_next_year = (
                 op_margins[[str(curr_year + 2)]].iloc[0].values[0]
-                if str(curr_year + 2) in op_margins.columns
+                if not op_margins.empty and str(curr_year + 2) in op_margins.columns
                 else 0
             )  # MarketScreener has some inconsistencies of EBIT values versus yahoo finance
             return {
@@ -503,11 +511,133 @@ def get_revenue_forecasts(url):
                 "compounded_annual_revenue_growth_rate": compounded_annual_revenue_growth_rate,
                 "operating_margin_next_year": 0 if pd.isna(op_margin_next_year) else float(op_margin_next_year),
                 "consensus_revenues": consensus_revenues,
+                "consensus_ebit": consensus_ebit,
                 "currency": currency,
                 "unit": unit,
             }
 
     return default_forecasts
+
+
+def get_statement_metric_series(statement: pd.DataFrame, metric_names: list[str]) -> pd.Series:
+    for metric_name in metric_names:
+        if metric_name in statement.index:
+            return pd.to_numeric(statement.loc[metric_name], errors="coerce").fillna(0)
+    return pd.Series(dtype=float)
+
+
+def parse_timestamp(value):
+    ts = pd.Timestamp(value, unit="s") if isinstance(value, (int, float)) else pd.Timestamp(value)
+    return ts.tz_localize(None) if ts.tzinfo else ts
+
+
+def get_fiscal_quarter_number(quarter_end: pd.Timestamp, fiscal_year_end: pd.Timestamp) -> int:
+    month_delta = (quarter_end.month - fiscal_year_end.month - 1) % 12
+    return month_delta // 3 + 1
+
+
+def build_fiscal_bridge_context(info: dict, quarterly_income_statement: pd.DataFrame):
+    if quarterly_income_statement.empty:
+        return None
+
+    last_fiscal_year_end = parse_timestamp(info.get("lastFiscalYearEnd"))
+    if last_fiscal_year_end is None:
+        return None
+
+    revenue_series = get_statement_metric_series(
+        quarterly_income_statement,
+        ["Total Revenue", "Operating Revenue", "Revenue"],
+    )
+    if revenue_series.empty:
+        return None
+
+    operating_income_series = get_statement_metric_series(
+        quarterly_income_statement,
+        ["EBIT", "Operating Income"],
+    )
+
+    quarter_rows = [
+        {
+            "quarter_end": parse_timestamp(column),
+            "revenue": float(revenue_series.get(column, 0)),
+            "operating_income": float(operating_income_series.get(column, 0)),
+        }
+        for column in quarterly_income_statement.columns
+    ]
+    if not quarter_rows:
+        return None
+
+    quarters = pd.DataFrame(quarter_rows).sort_values("quarter_end", ascending=False).reset_index(drop=True)
+    current_fiscal_year_end = last_fiscal_year_end + pd.DateOffset(years=1)
+    current_fiscal_year = current_fiscal_year_end.year
+    next_fiscal_year = current_fiscal_year + 1
+
+    ytd_quarters = quarters[quarters["quarter_end"] > last_fiscal_year_end]
+    quarters_reported = ytd_quarters.shape[0]
+    if quarters_reported <= 0 or quarters_reported > 4:
+        return None
+
+    recent_four_quarters = quarters.head(4).copy()
+    recent_four_quarters["fiscal_quarter"] = recent_four_quarters["quarter_end"].apply(
+        lambda quarter_end: get_fiscal_quarter_number(quarter_end, last_fiscal_year_end)
+    )
+    recent_total_revenue = recent_four_quarters["revenue"].sum()
+    if recent_total_revenue > 0 and recent_four_quarters["fiscal_quarter"].nunique() == 4:
+        quarter_weights = {
+            int(fq): v / recent_total_revenue
+            for fq, v in recent_four_quarters.groupby("fiscal_quarter")["revenue"].sum().items()
+        }
+        next_fiscal_year_weight = sum(quarter_weights.get(q, 0) for q in range(1, quarters_reported + 1))
+    else:
+        next_fiscal_year_weight = quarters_reported / 4
+
+    return {
+        "current_fiscal_year": str(current_fiscal_year),
+        "next_fiscal_year": str(next_fiscal_year),
+        "quarters_reported": quarters_reported,
+        "actual_ytd_revenue": float(ytd_quarters["revenue"].sum()),
+        "actual_ytd_operating_income": float(ytd_quarters["operating_income"].sum()),
+        "next_fiscal_year_weight": next_fiscal_year_weight,
+    }
+
+
+def bridge_fiscal_year_values(current_fiscal_value, next_fiscal_value, actual_ytd_value, next_fiscal_year_weight, clamp_remaining=False):
+    if current_fiscal_value is None or next_fiscal_value is None:
+        return None
+
+    remaining_current_fiscal_value = current_fiscal_value - actual_ytd_value
+    if clamp_remaining:
+        remaining_current_fiscal_value = max(remaining_current_fiscal_value, 0)
+
+    return remaining_current_fiscal_value + next_fiscal_year_weight * next_fiscal_value
+
+
+def build_rolling_ntm_revenue_path(consensus_revenues: dict, bridge_context: dict):
+    current_fiscal_year = int(bridge_context["current_fiscal_year"])
+    next_fiscal_year_weight = bridge_context["next_fiscal_year_weight"]
+    current_year_revenue = consensus_revenues.get(str(current_fiscal_year))
+    next_year_revenue = consensus_revenues.get(str(current_fiscal_year + 1))
+    if current_year_revenue is None or next_year_revenue is None:
+        return []
+
+    rolling_revenues = [
+        bridge_fiscal_year_values(
+            current_year_revenue,
+            next_year_revenue,
+            bridge_context["actual_ytd_revenue"],
+            next_fiscal_year_weight,
+            clamp_remaining=True,
+        )
+    ]
+
+    for fiscal_year in range(current_fiscal_year + 1, current_fiscal_year + 3):
+        current_value = consensus_revenues.get(str(fiscal_year))
+        next_value = consensus_revenues.get(str(fiscal_year + 1))
+        if current_value is None or next_value is None:
+            break
+        rolling_revenues.append((1 - next_fiscal_year_weight) * current_value + next_fiscal_year_weight * next_value)
+
+    return [v for v in rolling_revenues if v is not None and np.isfinite(v)]
 
 
 def get_similar_stocks(ticker: str):
@@ -653,8 +783,8 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     value_of_options = 0
 
     ticker = yf.Ticker(ticker)
-    q_income_statement = ticker.quarterly_income_stmt
-    ttm_income_statement = q_income_statement[q_income_statement.columns[:4]].T.fillna(0)
+    quarterly_income_statement = normalize_quarterly_statement(ticker.quarterly_income_stmt)
+    ttm_income_statement = quarterly_income_statement[quarterly_income_statement.columns[:4]].T.fillna(0)
     last_balance_sheet = ticker.quarterly_balance_sheet
     last_balance_sheet = last_balance_sheet[last_balance_sheet.columns[:4]].T.ffill().bfill()
     info = ticker.get_info()
@@ -673,8 +803,31 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
             ttm_income_statement["Net Income"] = ttm_income_statement.get("Net Income", 0) * fx_rate
             ttm_income_statement["Operating Income"] = ttm_income_statement.get("Operating Income", 0) * fx_rate
 
-    revenues = ttm_income_statement.get("Operating Revenue", pd.Series([0] * len(ttm_income_statement))).sum()
-    interest_expense = ttm_income_statement.get("Interest Expense", pd.Series([0] * len(ttm_income_statement))).sum()
+    ttm_columns = list(quarterly_income_statement.columns[:4])
+    revenue_series = get_statement_metric_series(
+        quarterly_income_statement,
+        ["Total Revenue", "Operating Revenue", "Revenue"],
+    ).reindex(ttm_columns, fill_value=0) * fx_rate
+    operating_income_series = get_statement_metric_series(
+        quarterly_income_statement,
+        ["EBIT", "Operating Income"],
+    ).reindex(ttm_columns, fill_value=0) * fx_rate
+    interest_expense_series = get_statement_metric_series(
+        quarterly_income_statement,
+        ["Interest Expense"],
+    ).reindex(ttm_columns, fill_value=0) * fx_rate
+    pretax_income_series = get_statement_metric_series(
+        quarterly_income_statement,
+        ["Pretax Income"],
+    ).reindex(ttm_columns, fill_value=0) * fx_rate
+    tax_rate_series = get_statement_metric_series(
+        quarterly_income_statement,
+        ["Tax Rate For Calcs"],
+    ).reindex(ttm_columns, fill_value=0)
+
+    revenues = revenue_series.sum()
+    operating_income_ttm = operating_income_series.sum()
+    interest_expense = interest_expense_series.sum()
     book_value_of_equity = last_balance_sheet.get("Stockholders Equity", pd.Series([0])).iloc[0]
     book_value_of_debt = last_balance_sheet.get("Total Debt", pd.Series([0])).iloc[0]
     cash_and_marketable_securities = last_balance_sheet.get("Cash Cash Equivalents And Short Term Investments", pd.Series([0])).iloc[0]
@@ -682,9 +835,8 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     minority_interest = last_balance_sheet.get("Minority Interest", pd.Series([0])).iloc[0]  # by right. should convert to market value
     number_of_shares_outstanding = info.get("sharesOutstanding", 0)
     curr_price = info.get("previousClose", 0)
-    effective_tax_rate = (ttm_income_statement.get("Tax Rate For Calcs", pd.Series([0])) * ttm_income_statement.get("Pretax Income", pd.Series([0]))).sum() / ttm_income_statement.get(
-        "Pretax Income", pd.Series([1])
-    ).sum()
+    pretax_income_total = pretax_income_series.sum()
+    effective_tax_rate = (tax_rate_series * pretax_income_series).sum() / pretax_income_total if pretax_income_total else 0
 
     regions = region_mapper.get_closest(info["country"])
 
@@ -697,24 +849,49 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     regional_revenues = get_revenue_by_region(info["symbol"], marketscreener_url)
     equity_risk_premium, mapped_regional_revenues = get_regional_crps(regional_revenues, region_mapper, country_erps)
     equity_risk_premium = equity_risk_premium + mature_erp
-    _, company_spread, prob_of_failure = synthetic_rating(info["marketCap"], ttm_income_statement["Operating Income"].sum(), interest_expense)
+    _, company_spread, prob_of_failure = synthetic_rating(info["marketCap"], operating_income_ttm, interest_expense)
     pre_tax_cost_of_debt = risk_free_rate + company_spread + country_erps[regions[0]]
 
     target_pre_tax_operating_margin = avg_metrics["Pre-tax Operating Margin (Unadjusted)"][industry]
 
-    operating_margin_this_year = info.get("operatingMargins", ttm_income_statement["Operating Income"].sum() / revenues)
+    operating_margin_this_year = info.get("operatingMargins", operating_income_ttm / revenues if revenues else 0)
 
     forecast_defaults = get_revenue_forecasts(marketscreener_url)
     consensus_revenues_usd = {
         year: value * fx_rate
         for year, value in forecast_defaults.get("consensus_revenues", {}).items()
     }
-    curr_year = datetime.datetime.now().year - 1
-    next_fiscal_year = str(curr_year + 2)
+    consensus_ebit_usd = {
+        year: value * fx_rate
+        for year, value in forecast_defaults.get("consensus_ebit", {}).items()
+    }
+    fiscal_bridge_context = build_fiscal_bridge_context(info, quarterly_income_statement)
+    current_fiscal_year = None
+    next_fiscal_year = None
+    bridged_ntm_revenue = None
+    rolling_ntm_revenues = []
     revenue_growth_rate_next_year = forecast_defaults.get("revenue_growth_rate_next_year", 0)
-    next_fiscal_year_consensus = consensus_revenues_usd.get(next_fiscal_year)
-    if next_fiscal_year_consensus and revenues:
-        revenue_growth_rate_next_year = next_fiscal_year_consensus / revenues - 1
+    if fiscal_bridge_context:
+        current_fiscal_year = fiscal_bridge_context["current_fiscal_year"]
+        next_fiscal_year = fiscal_bridge_context["next_fiscal_year"]
+        current_fiscal_year_consensus = consensus_revenues_usd.get(current_fiscal_year)
+        next_fiscal_year_consensus = consensus_revenues_usd.get(next_fiscal_year)
+        bridged_ntm_revenue = bridge_fiscal_year_values(
+            current_fiscal_year_consensus,
+            next_fiscal_year_consensus,
+            fiscal_bridge_context["actual_ytd_revenue"],
+            fiscal_bridge_context["next_fiscal_year_weight"],
+            clamp_remaining=True,
+        )
+        if bridged_ntm_revenue and revenues:
+            revenue_growth_rate_next_year = bridged_ntm_revenue / revenues - 1
+        rolling_ntm_revenues = build_rolling_ntm_revenue_path(consensus_revenues_usd, fiscal_bridge_context)
+    else:
+        curr_year = datetime.datetime.now().year - 1
+        next_fiscal_year = str(curr_year + 2)
+        next_fiscal_year_consensus = consensus_revenues_usd.get(next_fiscal_year)
+        if next_fiscal_year_consensus and revenues:
+            revenue_growth_rate_next_year = next_fiscal_year_consensus / revenues - 1
 
     post_bridge_years = sorted(
         [year for year in consensus_revenues_usd.keys() if int(year) >= int(next_fiscal_year)],
@@ -727,12 +904,29 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
         if previous_value:
             post_bridge_growth_rates.append(later_value / previous_value - 1)
 
+    rolling_ntm_growth_rates = []
+    for current_value, next_value in zip(rolling_ntm_revenues, rolling_ntm_revenues[1:]):
+        if current_value:
+            rolling_ntm_growth_rates.append(next_value / current_value - 1)
     compounded_annual_revenue_growth_rate = (
-        float(np.mean(post_bridge_growth_rates))
+        float(np.mean(rolling_ntm_growth_rates))
+        if rolling_ntm_growth_rates
+        else float(np.mean(post_bridge_growth_rates))
         if post_bridge_growth_rates
         else forecast_defaults.get("compounded_annual_revenue_growth_rate", 0)
     )
     operating_margin_next_year = forecast_defaults.get("operating_margin_next_year", 0)
+    if fiscal_bridge_context:
+        current_fiscal_year_consensus_ebit = consensus_ebit_usd.get(current_fiscal_year)
+        next_fiscal_year_consensus_ebit = consensus_ebit_usd.get(next_fiscal_year)
+        bridged_ntm_operating_income = bridge_fiscal_year_values(
+            current_fiscal_year_consensus_ebit,
+            next_fiscal_year_consensus_ebit,
+            fiscal_bridge_context["actual_ytd_operating_income"],
+            fiscal_bridge_context["next_fiscal_year_weight"],
+        )
+        if bridged_ntm_operating_income is not None and bridged_ntm_revenue not in (None, 0):
+            operating_margin_next_year = bridged_ntm_operating_income / bridged_ntm_revenue
     operating_margin_next_year = max(operating_margin_next_year, operating_margin_this_year)
     target_pre_tax_operating_margin = max(target_pre_tax_operating_margin, operating_margin_next_year)
     year_of_convergence_for_margin = 5
@@ -745,7 +939,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
         "dcf_inputs": {
             "name": name,
             "revenues": revenues,
-            "operating_income": ttm_income_statement["Operating Income"].sum(),
+            "operating_income": operating_income_ttm,
             "interest_expense": interest_expense,
             "book_value_of_equity": book_value_of_equity,
             "book_value_of_debt": book_value_of_debt,
@@ -783,7 +977,13 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
                 "forecast_context": {
                     "consensus_revenues": consensus_revenues_usd,
                     "ms_growth_next_year": forecast_defaults.get("revenue_growth_rate_next_year", 0),
+                    "current_fiscal_year": current_fiscal_year,
                     "next_fiscal_year": next_fiscal_year,
+                    "quarters_reported": fiscal_bridge_context["quarters_reported"] if fiscal_bridge_context else None,
+                    "actual_ytd_revenue": fiscal_bridge_context["actual_ytd_revenue"] if fiscal_bridge_context else None,
+                    "next_fiscal_year_weight": fiscal_bridge_context["next_fiscal_year_weight"] if fiscal_bridge_context else None,
+                    "bridged_ntm_revenue": bridged_ntm_revenue,
+                    "rolling_ntm_revenues": rolling_ntm_revenues,
                 },
             },
         },

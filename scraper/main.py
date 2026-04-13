@@ -110,7 +110,7 @@ def get_htmls(urls, use_proxy=False, workers=MAX_WORKERS):
     html_responses = []
     for i in range(0, len(urls), workers):
         batch = urls[i : i + workers]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(batch))) as executor:
             batch_htmls = list(executor.map(lambda u: fetch_html(u, use_proxy=use_proxy), batch))
             html_responses.extend(batch_htmls)
         time.sleep(1)

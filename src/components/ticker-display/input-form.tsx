@@ -25,30 +25,34 @@ import InfoHover from "../info-hover";
 import Link from "next/link";
 import { Switch } from "../ui/switch";
 
+const userDCFInputSchema = z.object({
+  revenues: z.coerce.number(),
+  revenue_growth_rate_next_year: z.coerce.number(),
+  operating_margin_next_year: z.coerce.number().min(0),
+  compounded_annual_revenue_growth_rate: z.coerce.number(),
+  target_pre_tax_operating_margin: z.coerce.number(),
+  year_of_convergence_for_margin: z.coerce.number().min(0).max(10),
+  discount_rate: z.coerce.number(),
+  years_of_high_growth: z.coerce.number().min(0).max(10),
+  sales_to_capital_ratio_early: z.coerce.number(),
+  sales_to_capital_ratio_steady: z.coerce.number(),
+  prob_of_failure: z.coerce.number(),
+  value_of_options: z.coerce.number(),
+  adjust_r_and_d: z.coerce.boolean(),
+});
+
+type UserDCFFormValues = z.infer<typeof userDCFInputSchema>;
+type NumericFieldKey = Exclude<keyof UserDCFFormValues, "adjust_r_and_d">;
+
 type FieldValue = {
   displayLabel: string;
-  key: keyof UserDCFInputs;
+  key: NumericFieldKey;
   tooltip: string;
   decodeFn: (value: string) => number;
 };
 
 function InputForm({ defaults }: { defaults: UserDCFInputs }) {
   const router = useRouter();
-  const userDCFInputSchema = z.object({
-    revenues: z.coerce.number(),
-    revenue_growth_rate_next_year: z.coerce.number(),
-    operating_margin_next_year: z.coerce.number().min(0),
-    compounded_annual_revenue_growth_rate: z.coerce.number(),
-    target_pre_tax_operating_margin: z.coerce.number(),
-    year_of_convergence_for_margin: z.coerce.number().min(0).max(10),
-    discount_rate: z.coerce.number(),
-    years_of_high_growth: z.coerce.number().min(0).max(10),
-    sales_to_capital_ratio_early: z.coerce.number(),
-    sales_to_capital_ratio_steady: z.coerce.number(),
-    prob_of_failure: z.coerce.number(),
-    value_of_options: z.coerce.number(),
-    adjust_r_and_d: z.coerce.boolean(),
-  });
 
   let formDefaults: UserDCFInputs = {
     revenues: defaults.revenues / 1e6,
@@ -76,7 +80,7 @@ function InputForm({ defaults }: { defaults: UserDCFInputs }) {
     })
   ) as UserDCFInputs;
 
-  const form = useForm<z.infer<typeof userDCFInputSchema>>({
+  const form = useForm<UserDCFFormValues>({
     resolver: zodResolver(userDCFInputSchema),
     defaultValues: formDefaults,
   });
@@ -170,7 +174,7 @@ function InputForm({ defaults }: { defaults: UserDCFInputs }) {
       <FormField
         key={item.key}
         control={form.control}
-        name={item.key as string}
+        name={item.key}
         render={({ field }) => (
           <FormItem className="flex">
             <FormLabel className="place-content-center pr-2 text-xs w-3/5">

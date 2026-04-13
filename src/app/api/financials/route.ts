@@ -6,6 +6,7 @@ const MAX_TICKERS = 20;
 type FinancialRow = {
   Ticker: string;
   Name: string;
+  ttmPeriodEnd: string | null;
   pctOf52WeekHigh: number | null;
   revenue: number | null;
   netIncome: number | null;
@@ -31,37 +32,15 @@ function toFiniteNumber(value: unknown): number | null {
   return null;
 }
 
-function unitMultiplier(unit: unknown): number {
-  const unitStr = typeof unit === "string" ? unit.toLowerCase() : "";
-  if (unitStr.includes("trillion")) return 1e12;
-  if (unitStr.includes("billion")) return 1e9;
-  if (unitStr.includes("million")) return 1e6;
-  if (unitStr.includes("thousand")) return 1e3;
-  return 1;
-}
-
-function getLatestAndPrevious(
+function getTtmSeries(
   doc: Record<string, unknown>,
-  metricName: string,
+  latestKey: string,
+  previousKey: string,
 ): { latest: number | null; previous: number | null } {
-  const regex = new RegExp(`^${metricName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s(\\d{4})$`);
-  const candidates: Array<{ year: number; value: number }> = [];
-  for (const [key, rawValue] of Object.entries(doc)) {
-    const match = key.match(regex);
-    if (!match) continue;
-    const year = Number(match[1]);
-    const value = toFiniteNumber(rawValue);
-    if (Number.isFinite(year) && value !== null) {
-      candidates.push({ year, value });
-    }
-  }
-
-  candidates.sort((a, b) => b.year - a.year);
-  const scale = unitMultiplier(doc.Unit);
-  const latest = candidates[0] ? candidates[0].value * scale : null;
-  const previous = candidates[1] ? candidates[1].value * scale : null;
-
-  return { latest, previous };
+  return {
+    latest: toFiniteNumber(doc[latestKey]),
+    previous: toFiniteNumber(doc[previousKey]),
+  };
 }
 
 function ratio(numerator: number | null, denominator: number | null): number | null {
@@ -89,14 +68,15 @@ function normalizeCompanyName(value: unknown): string {
 }
 
 function mapToComparisonRow(doc: Record<string, unknown>): FinancialRow {
-  const revenueSeries = getLatestAndPrevious(doc, "Net sales");
-  const netIncomeSeries = getLatestAndPrevious(doc, "Net income");
-  const ebitdaSeries = getLatestAndPrevious(doc, "EBITDA");
-  const ebitSeries = getLatestAndPrevious(doc, "EBIT");
+  const revenueSeries = getTtmSeries(doc, "Revenue TTM", "Revenue Prev TTM");
+  const netIncomeSeries = getTtmSeries(doc, "Net Income TTM", "Net Income Prev TTM");
+  const ebitdaSeries = getTtmSeries(doc, "EBITDA TTM", "EBITDA Prev TTM");
+  const ebitSeries = getTtmSeries(doc, "EBIT TTM", "EBIT Prev TTM");
 
   const price = toFiniteNumber(doc.Price);
   const weekHigh = toFiniteNumber(doc["52-Week High"]);
   const enterpriseValue = toFiniteNumber(doc["Enterprise Value"]);
+  const ttmPeriodEnd = typeof doc["TTM Period End"] === "string" ? doc["TTM Period End"] : null;
   const pctOf52WeekHigh =
     price !== null && weekHigh !== null && weekHigh !== 0
       ? (price / weekHigh) * 100
@@ -105,6 +85,7 @@ function mapToComparisonRow(doc: Record<string, unknown>): FinancialRow {
   return {
     Ticker: String(doc.Ticker ?? ""),
     Name: normalizeCompanyName(doc.Name),
+    ttmPeriodEnd,
     pctOf52WeekHigh,
     revenue: revenueSeries.latest,
     netIncome: netIncomeSeries.latest,

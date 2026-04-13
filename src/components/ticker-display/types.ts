@@ -17,6 +17,12 @@ export type UserDCFInputs = {
   adjust_r_and_d: boolean;
 };
 
+export type ForecastContext = {
+  consensus_revenues?: Record<string, number>;
+  ms_growth_next_year?: number;
+  next_fiscal_year?: string;
+};
+
 // Types required to create the DCF model
 export type DCFInputData = {
   [key: string]: number | undefined | number[];

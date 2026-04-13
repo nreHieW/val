@@ -433,10 +433,21 @@ def get_revenue_by_region(ticker, url):
 
 
 def get_revenue_forecasts(url):
+    default_forecasts = {
+        "revenue_growth_rate_next_year": 0,
+        "compounded_annual_revenue_growth_rate": 0,
+        "operating_margin_next_year": 0,
+        "consensus_revenues": {},
+        "currency": "",
+        "unit": "",
+    }
     page = requests.get(url + "finances/", headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
     soup = BeautifulSoup(page.content, features="lxml")
     for div in soup.find_all("div", {"class": "card card--collapsible mb-15"}):
-        header_text = div.find("div", {"class": "card-header"}).text.lower()
+        header = div.find("div", {"class": "card-header"})
+        if not header:
+            continue
+        header_text = header.text.lower()
         if "income statement" in header_text:
             income_statement = pd.read_html(StringIO(str(div.find("table"))))[0]
             income_statement = income_statement.dropna(axis=1, how="all")
@@ -444,17 +455,59 @@ def get_revenue_forecasts(url):
             income_statement.set_index(income_statement.columns[0], inplace=True)
             income_statement.index = income_statement.index.str.strip()
 
-            indiv = income_statement.loc[["Net sales"]]
+            superscript = div.find("sup")
+            currency = ""
+            unit = ""
+            if superscript and superscript.attrs.get("title"):
+                title = superscript.attrs["title"].strip().split()
+                currency = title[0] if len(title) > 0 else ""
+                unit = title[-1] if len(title) > 1 else ""
+
+            unit_multiplier = {
+                "trillion": 1e12,
+                "billion": 1e9,
+                "million": 1e6,
+                "thousand": 1e3,
+            }.get(unit.lower(), 1)
+
+            indiv = income_statement.loc[["Net sales"]].apply(
+                lambda column: pd.to_numeric(column.astype(str).str.replace(",", ""), errors="coerce")
+            )
             curr_year = datetime.datetime.now().year - 1
+            if str(curr_year) not in indiv.columns:
+                return default_forecasts
+
             curr_year_index = indiv.columns.get_loc(str(curr_year))
             indiv = indiv.iloc[:, curr_year_index:].astype(float)
+            consensus_revenues = {
+                str(column): float(value) * unit_multiplier
+                for column, value in indiv.iloc[0].items()
+                if pd.notna(value)
+            }
             growth = indiv.pct_change(axis=1)
-            revenue_growth_rate_next_year, compounded_annual_revenue_growth_rate = growth.values[0][1], growth.values[0, 1:].mean()
-            ebit = income_statement.loc[["EBIT"]].iloc[0, curr_year_index:].apply(lambda x: 0 if x != "-" else float(x))
+            revenue_growth_rate_next_year = growth.values[0][1] if growth.shape[1] > 1 and pd.notna(growth.values[0][1]) else 0
+            raw_compounded_growth_rates = [value for value in growth.values[0][1:] if pd.notna(value)]
+            compounded_annual_revenue_growth_rate = float(np.mean(raw_compounded_growth_rates)) if raw_compounded_growth_rates else 0
+            ebit = income_statement.loc[["EBIT"]].iloc[0, curr_year_index:].apply(
+                lambda x: pd.to_numeric(str(x).replace(",", ""), errors="coerce")
+            )
 
             op_margins = ebit / indiv
-            op_margin_next_year = op_margins[[str(curr_year + 2)]].iloc[0].values[0]  # MarketScreener has some inconsistencies of EBIT values versus yahoo finance
-            return revenue_growth_rate_next_year, compounded_annual_revenue_growth_rate, op_margin_next_year
+            op_margin_next_year = (
+                op_margins[[str(curr_year + 2)]].iloc[0].values[0]
+                if str(curr_year + 2) in op_margins.columns
+                else 0
+            )  # MarketScreener has some inconsistencies of EBIT values versus yahoo finance
+            return {
+                "revenue_growth_rate_next_year": revenue_growth_rate_next_year,
+                "compounded_annual_revenue_growth_rate": compounded_annual_revenue_growth_rate,
+                "operating_margin_next_year": 0 if pd.isna(op_margin_next_year) else float(op_margin_next_year),
+                "consensus_revenues": consensus_revenues,
+                "currency": currency,
+                "unit": unit,
+            }
+
+    return default_forecasts
 
 
 def get_similar_stocks(ticker: str):
@@ -608,9 +661,11 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     yahoo_profile = build_yahoo_profile(info.get("symbol", ticker.ticker), info)
     name = info.get("longName")
     curr_currency = info.get("financialCurrency")
+    fx_rate = 1
     if curr_currency:
-        fx_rate = fx_rates.get(curr_currency)
-        if fx_rate:
+        resolved_fx_rate = fx_rates.get(curr_currency)
+        if resolved_fx_rate:
+            fx_rate = resolved_fx_rate
             last_balance_sheet = last_balance_sheet.apply(lambda x: x * fx_rate)
             ttm_income_statement["Operating Revenue"] = ttm_income_statement.get("Operating Revenue", 0) * fx_rate
             ttm_income_statement["Interest Expense"] = ttm_income_statement.get("Interest Expense", 0) * fx_rate
@@ -649,7 +704,35 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
 
     operating_margin_this_year = info.get("operatingMargins", ttm_income_statement["Operating Income"].sum() / revenues)
 
-    revenue_growth_rate_next_year, compounded_annual_revenue_growth_rate, operating_margin_next_year = get_revenue_forecasts(marketscreener_url)
+    forecast_defaults = get_revenue_forecasts(marketscreener_url)
+    consensus_revenues_usd = {
+        year: value * fx_rate
+        for year, value in forecast_defaults.get("consensus_revenues", {}).items()
+    }
+    curr_year = datetime.datetime.now().year - 1
+    next_fiscal_year = str(curr_year + 2)
+    revenue_growth_rate_next_year = forecast_defaults.get("revenue_growth_rate_next_year", 0)
+    next_fiscal_year_consensus = consensus_revenues_usd.get(next_fiscal_year)
+    if next_fiscal_year_consensus and revenues:
+        revenue_growth_rate_next_year = next_fiscal_year_consensus / revenues - 1
+
+    post_bridge_years = sorted(
+        [year for year in consensus_revenues_usd.keys() if int(year) >= int(next_fiscal_year)],
+        key=int,
+    )
+    post_bridge_growth_rates = []
+    for previous_year, later_year in zip(post_bridge_years, post_bridge_years[1:]):
+        previous_value = consensus_revenues_usd.get(previous_year, 0)
+        later_value = consensus_revenues_usd.get(later_year, 0)
+        if previous_value:
+            post_bridge_growth_rates.append(later_value / previous_value - 1)
+
+    compounded_annual_revenue_growth_rate = (
+        float(np.mean(post_bridge_growth_rates))
+        if post_bridge_growth_rates
+        else forecast_defaults.get("compounded_annual_revenue_growth_rate", 0)
+    )
+    operating_margin_next_year = forecast_defaults.get("operating_margin_next_year", 0)
     operating_margin_next_year = max(operating_margin_next_year, operating_margin_this_year)
     target_pre_tax_operating_margin = max(target_pre_tax_operating_margin, operating_margin_next_year)
     year_of_convergence_for_margin = 5
@@ -697,6 +780,11 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
                 "similar_stocks": get_similar_stocks(info["symbol"]),
                 "research_and_development": r_and_d_expenses,
                 "last_updated_financials": ttm_income_statement.index[0].strftime("%Y-%m-%d"),
+                "forecast_context": {
+                    "consensus_revenues": consensus_revenues_usd,
+                    "ms_growth_next_year": forecast_defaults.get("revenue_growth_rate_next_year", 0),
+                    "next_fiscal_year": next_fiscal_year,
+                },
             },
         },
         "yahoo_profile": yahoo_profile,
@@ -795,6 +883,140 @@ def build_yahoo_profile(ticker, ticker_info):
         "Enterprise Value": ticker_info.get("enterpriseValue"),
         "Beta": ticker_info.get("beta"),
     }
+
+
+def normalize_quarterly_statement(statement: pd.DataFrame) -> pd.DataFrame:
+    if statement is None or statement.empty:
+        return pd.DataFrame()
+
+    statement = statement.copy()
+    statement = statement.loc[~statement.index.duplicated(keep="first")]
+    ordered_columns = sorted(statement.columns, key=lambda column: pd.Timestamp(column), reverse=True)
+    return statement.loc[:, ordered_columns].fillna(0)
+
+
+def sum_statement_metric(statement: pd.DataFrame, metric_names: list[str], start=0, count=4):
+    if statement.empty:
+        return None
+
+    columns = list(statement.columns[start : start + count])
+    if len(columns) == 0:
+        return None
+
+    for metric_name in metric_names:
+        if metric_name in statement.index:
+            values = pd.to_numeric(statement.loc[metric_name, columns], errors="coerce").fillna(0)
+            return float(values.sum())
+
+    return None
+
+
+def compute_ebitda(statement: pd.DataFrame, start=0, count=4):
+    ebitda = sum_statement_metric(statement, ["EBITDA"], start=start, count=count)
+    if ebitda is not None:
+        return ebitda
+
+    ebit = sum_statement_metric(statement, ["EBIT", "Operating Income"], start=start, count=count)
+    depreciation = sum_statement_metric(
+        statement,
+        [
+            "Depreciation And Amortization",
+            "Depreciation Amortization Depletion Income Statement",
+            "Reconciled Depreciation",
+        ],
+        start=start,
+        count=count,
+    )
+    if ebit is None or depreciation is None:
+        return None
+    return ebit + depreciation
+
+
+def get_ttm_financials(ticker):
+    for attempt in range(YAHOO_INFO_RETRIES):
+        try:
+            yf_ticker = yf.Ticker(ticker)
+            quarterly_income_stmt = normalize_quarterly_statement(yf_ticker.quarterly_income_stmt)
+            if quarterly_income_stmt.empty:
+                return None
+
+            most_recent_quarter = quarterly_income_stmt.columns[0]
+            result = {
+                "Ticker": ticker,
+                "Revenue TTM": sum_statement_metric(
+                    quarterly_income_stmt,
+                    ["Total Revenue", "Operating Revenue", "Revenue"],
+                ),
+                "Revenue Prev TTM": sum_statement_metric(
+                    quarterly_income_stmt,
+                    ["Total Revenue", "Operating Revenue", "Revenue"],
+                    start=4,
+                    count=4,
+                ),
+                "Net Income TTM": sum_statement_metric(
+                    quarterly_income_stmt,
+                    [
+                        "Net Income Common Stockholders",
+                        "Net Income Including Noncontrolling Interests",
+                        "Net Income",
+                    ],
+                ),
+                "Net Income Prev TTM": sum_statement_metric(
+                    quarterly_income_stmt,
+                    [
+                        "Net Income Common Stockholders",
+                        "Net Income Including Noncontrolling Interests",
+                        "Net Income",
+                    ],
+                    start=4,
+                    count=4,
+                ),
+                "EBITDA TTM": compute_ebitda(quarterly_income_stmt),
+                "EBITDA Prev TTM": compute_ebitda(quarterly_income_stmt, start=4, count=4),
+                "EBIT TTM": sum_statement_metric(
+                    quarterly_income_stmt,
+                    ["EBIT", "Operating Income"],
+                ),
+                "EBIT Prev TTM": sum_statement_metric(
+                    quarterly_income_stmt,
+                    ["EBIT", "Operating Income"],
+                    start=4,
+                    count=4,
+                ),
+                "TTM Period End": pd.Timestamp(most_recent_quarter).strftime("%Y-%m-%d"),
+            }
+            return result
+        except YFRateLimitError:
+            if attempt == YAHOO_INFO_RETRIES - 1:
+                print(f"[ERROR] Yahoo rate limited for {ticker} TTM after {YAHOO_INFO_RETRIES} attempts")
+                return None
+
+            sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1)
+            print(f"[WARN] Yahoo rate limited for {ticker} TTM; retrying in {sleep_seconds:.1f}s")
+            time.sleep(sleep_seconds)
+        except Exception as e:
+            print(f"[ERROR] Failed to fetch TTM financials for {ticker}: {e}")
+            return None
+
+
+def compute_ttm_financials(tickers):
+    ttm_financials_by_ticker = {}
+    for i in range(0, len(tickers), YAHOO_INFO_MAX_WORKERS):
+        batch = tickers[i : i + YAHOO_INFO_MAX_WORKERS]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_INFO_MAX_WORKERS) as executor:
+            results = list(executor.map(get_ttm_financials, batch))
+        for result in results:
+            if result:
+                ttm_financials_by_ticker[result["Ticker"]] = result
+
+        if i + YAHOO_INFO_MAX_WORKERS < len(tickers):
+            time.sleep(1)
+
+    ordered_financials = [ttm_financials_by_ticker[ticker] for ticker in tickers if ticker in ttm_financials_by_ticker]
+    if not ordered_financials:
+        return pd.DataFrame(columns=["Ticker"]).set_index("Ticker")
+
+    return pd.DataFrame(ordered_financials).set_index("Ticker")
 
 
 def get_info(ticker):
@@ -920,13 +1142,14 @@ def run_dcf_scrape(tickers, client):
 
 
 def run_comps_scrape(tickers, client, cached_yahoo_profiles=None):
-    found_links = get_marketscreener_links(tickers)
-    marketscreener_df = parse_marketscreener(found_links)
     yahoo_df = get_and_parse_yahoo(tickers, cached_profiles=cached_yahoo_profiles)
+    ttm_financials_df = compute_ttm_financials(tickers)
     finviz_df = parse_finviz(tickers)
 
-    combined = pd.concat([yahoo_df, marketscreener_df, finviz_df], axis=1, join="outer")
+    combined = pd.concat([yahoo_df, ttm_financials_df, finviz_df], axis=1, join="outer")
     combined = combined.fillna(0)
+    if "TTM Period End" in combined.columns:
+        combined["TTM Period End"] = combined["TTM Period End"].replace(0, None)
     combined.reset_index(inplace=True)
     combined = combined.rename(columns={"index": "Ticker"})
     combined.sort_values("Ticker", inplace=True)

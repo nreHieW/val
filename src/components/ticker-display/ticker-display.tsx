@@ -141,6 +141,7 @@ export default async function TickerDisplay({
             value_of_options: dcfInputs.value_of_options,
             adjust_r_and_d: dcfInputs.r_and_d_expenses.length > 0,
           }}
+          forecastContext={dcfData.extras?.forecast_context}
         />
       </div>
     </TickerDisplayTabs>

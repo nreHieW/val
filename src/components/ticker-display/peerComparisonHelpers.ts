@@ -15,6 +15,7 @@ export type MetricKey =
 export type FinancialComparisonRow = {
   Ticker: string;
   Name: string;
+  ttmPeriodEnd?: string | null;
   pctOf52WeekHigh: number | null;
   revenue: number | null;
   netIncome: number | null;
@@ -75,6 +76,7 @@ export function formatMetricValue(key: MetricKey, value: number | null): string 
 }
 
 export function getCellBgColor(
+  key: MetricKey,
   value: number | null,
   baseValue: number | null,
   higherIsBetter: boolean,
@@ -91,10 +93,15 @@ export function getCellBgColor(
 
   const baseline = Math.abs(baseValue) < 1e-6 ? 1 : Math.abs(baseValue);
   const normalizedDiff = Math.min(Math.abs((value - baseValue) / baseline), 1);
-  const alpha = 0.14 + normalizedDiff * 0.28;
-  const better = higherIsBetter ? value > baseValue : value < baseValue;
+  const alpha = 0.22 + normalizedDiff * 0.38;
+  const isValuationMultiple = key === "evToEbitda" || key === "evToSales";
+  const better = isValuationMultiple && (!higherIsBetter || key === "evToEbitda" || key === "evToSales")
+    ? value > 0 && (baseValue <= 0 || value < baseValue)
+    : higherIsBetter
+      ? value > baseValue
+      : value < baseValue;
 
   return better
-    ? `rgba(34, 197, 94, ${alpha.toFixed(3)})`
-    : `rgba(239, 68, 68, ${alpha.toFixed(3)})`;
+    ? `rgba(22, 163, 74, ${alpha.toFixed(3)})`
+    : `rgba(220, 38, 38, ${alpha.toFixed(3)})`;
 }

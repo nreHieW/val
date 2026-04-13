@@ -5,7 +5,7 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
-import { UserDCFInputs } from "./types";
+import { ForecastContext, UserDCFInputs } from "./types";
 import { z } from "zod";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -19,7 +19,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "../ui/input";
-import { encodeInputs } from "./dataHelpers";
+import { encodeInputs, formatAmount } from "./dataHelpers";
 import { usePathname, useRouter } from "next/navigation";
 import InfoHover from "../info-hover";
 import Link from "next/link";
@@ -51,7 +51,17 @@ type FieldValue = {
   decodeFn: (value: string) => number;
 };
 
-function InputForm({ defaults }: { defaults: UserDCFInputs }) {
+function formatRate(value: number): string {
+  return `${(value * 100).toFixed(2)}%`;
+}
+
+function InputForm({
+  defaults,
+  forecastContext,
+}: {
+  defaults: UserDCFInputs;
+  forecastContext?: ForecastContext;
+}) {
   const router = useRouter();
 
   let formDefaults: UserDCFInputs = {
@@ -84,6 +94,20 @@ function InputForm({ defaults }: { defaults: UserDCFInputs }) {
     resolver: zodResolver(userDCFInputSchema),
     defaultValues: formDefaults,
   });
+
+  const consensusRevenues = forecastContext?.consensus_revenues ?? {};
+  const sortedConsensusEntries = Object.entries(consensusRevenues).sort(
+    ([leftYear], [rightYear]) => Number(leftYear) - Number(rightYear),
+  );
+  const nextFiscalYear = forecastContext?.next_fiscal_year;
+  const nextFiscalYearConsensus = nextFiscalYear
+    ? consensusRevenues[nextFiscalYear]
+    : undefined;
+  const postBridgeEntries = nextFiscalYear
+    ? sortedConsensusEntries.filter(
+        ([year]) => Number(year) >= Number(nextFiscalYear),
+      )
+    : sortedConsensusEntries;
 
 
   const essentialFields: FieldValue[] = [
@@ -169,33 +193,73 @@ function InputForm({ defaults }: { defaults: UserDCFInputs }) {
   ];
   const allFields = [...essentialFields, ...advancedFields];
 
+  function renderForecastContext(key: NumericFieldKey) {
+    if (
+      key === "revenue_growth_rate_next_year" &&
+      nextFiscalYear &&
+      typeof nextFiscalYearConsensus === "number"
+    ) {
+      const segments = [
+        `TTM Base: ${formatAmount(defaults.revenues, true)}`,
+        `Consensus FY${nextFiscalYear}: ${formatAmount(nextFiscalYearConsensus, true)}`,
+        typeof forecastContext?.ms_growth_next_year === "number"
+          ? `Raw FY growth: ${formatRate(forecastContext.ms_growth_next_year)}`
+          : null,
+        `Adjusted bridge: ${formatRate(defaults.revenue_growth_rate_next_year)}`,
+      ].filter(Boolean);
+
+      return (
+        <p className="pl-[62%] pr-1 text-[11px] text-muted-foreground/70">
+          {segments.join(" | ")}
+        </p>
+      );
+    }
+
+    if (key === "compounded_annual_revenue_growth_rate" && postBridgeEntries.length > 0) {
+      const consensusPath = postBridgeEntries
+        .slice(0, 3)
+        .map(([year, value]) => `FY${year} ${formatAmount(value, true)}`)
+        .join(" -> ");
+
+      return (
+        <p className="pl-[62%] pr-1 text-[11px] text-muted-foreground/70">
+          {`Post-bridge consensus path: ${consensusPath} | Default CAGR: ${formatRate(defaults.compounded_annual_revenue_growth_rate)}`}
+        </p>
+      );
+    }
+
+    return null;
+  }
+
   function renderInputField(item: FieldValue) {
     return (
-      <FormField
-        key={item.key}
-        control={form.control}
-        name={item.key}
-        render={({ field }) => (
-          <FormItem className="flex">
-            <FormLabel className="place-content-center pr-2 text-xs w-3/5">
-              {item.displayLabel}
-            </FormLabel>{" "}
-            <div className="pt-2 pr-8 ">
-              <InfoHover text={item.tooltip} />
-            </div>
-            <FormControl>
-              <div className="w-full pr-1">
-                <Input
-                  {...field}
-                  placeholder={formDefaults[item.key]?.toFixed(2)}
-                  value={field.value}
-                />
-                <FormMessage className="text-xs mt-1" />
+      <div key={item.key} className="space-y-1">
+        <FormField
+          control={form.control}
+          name={item.key}
+          render={({ field }) => (
+            <FormItem className="flex">
+              <FormLabel className="place-content-center pr-2 text-xs w-3/5">
+                {item.displayLabel}
+              </FormLabel>{" "}
+              <div className="pt-2 pr-8 ">
+                <InfoHover text={item.tooltip} />
               </div>
-            </FormControl>
-          </FormItem>
-        )}
-      />
+              <FormControl>
+                <div className="w-full pr-1">
+                  <Input
+                    {...field}
+                    placeholder={formDefaults[item.key]?.toFixed(2)}
+                    value={field.value}
+                  />
+                  <FormMessage className="text-xs mt-1" />
+                </div>
+              </FormControl>
+            </FormItem>
+          )}
+        />
+        {renderForecastContext(item.key)}
+      </div>
     );
   }
 

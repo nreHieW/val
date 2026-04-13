@@ -31,13 +31,17 @@ export default function PeerMetricsTable({
   const visibleMetricDefinitions = METRICS.filter((metric) =>
     visibleMetrics.includes(metric.key),
   );
+  const companyColumnClass =
+    "sticky left-0 z-20 min-w-[220px] max-w-[220px] border-r border-border px-3 py-2";
 
   return (
-    <div className="w-full overflow-x-auto rounded border">
+    <div className="w-full overflow-x-auto rounded border bg-background pb-5">
       <table className="w-full min-w-[900px] text-xs">
         <thead>
           <tr className="bg-muted/40">
-            <th className="sticky left-0 z-10 bg-muted/70 px-3 py-2 text-left font-medium">
+            <th
+              className={`${companyColumnClass} bg-background text-left font-medium shadow-[8px_0_12px_-8px_rgba(0,0,0,0.65)]`}
+            >
               Company
             </th>
             {visibleMetricDefinitions.map((metric) => (
@@ -53,14 +57,19 @@ export default function PeerMetricsTable({
             return (
               <tr key={row.Ticker} className="border-t">
                 <td
-                  className={`sticky left-0 z-10 px-3 py-2 ${
-                    isMain ? "bg-muted/70 font-semibold" : "bg-background"
+                  className={`${companyColumnClass} shadow-[8px_0_12px_-8px_rgba(0,0,0,0.65)] ${
+                    isMain ? "bg-muted font-semibold" : "bg-background"
                   }`}
                 >
                   {row.Ticker}
                   {row.Name ? (
-                    <span className="block max-w-[230px] truncate font-normal text-muted-foreground">
+                    <span className="block truncate font-normal text-muted-foreground">
                       {row.Name}
+                    </span>
+                  ) : null}
+                  {row.ttmPeriodEnd ? (
+                    <span className="block truncate text-[11px] font-normal text-muted-foreground/80">
+                      TTM through {row.ttmPeriodEnd}
                     </span>
                   ) : null}
                 </td>
@@ -69,12 +78,12 @@ export default function PeerMetricsTable({
                   const baseValue = mainRow[metric.key];
                   const bgColor = isMain
                     ? undefined
-                    : getCellBgColor(value, baseValue, metric.higherIsBetter);
+                    : getCellBgColor(metric.key, value, baseValue, metric.higherIsBetter);
 
                   return (
                     <td
                       key={`${row.Ticker}-${metric.key}`}
-                      className="px-3 py-2 text-right tabular-nums"
+                      className="px-3 py-2 text-right tabular-nums transition-colors"
                       style={bgColor ? { backgroundColor: bgColor } : undefined}
                     >
                       {formatMetricValue(metric.key as MetricKey, value)}

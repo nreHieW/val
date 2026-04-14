@@ -22,6 +22,11 @@ import { Input } from "../ui/input";
 import { encodeInputs, formatAmount } from "./dataHelpers";
 import { usePathname, useRouter } from "next/navigation";
 import InfoHover from "../info-hover";
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "@/components/ui/hover-card";
 import Link from "next/link";
 import { Switch } from "../ui/switch";
 
@@ -96,6 +101,7 @@ function InputForm({
   });
 
   const consensusRevenues = forecastContext?.consensus_revenues ?? {};
+  const consensusEbit = forecastContext?.consensus_ebit ?? {};
   const sortedConsensusEntries = Object.entries(consensusRevenues).sort(
     ([leftYear], [rightYear]) => Number(leftYear) - Number(rightYear),
   );
@@ -107,11 +113,23 @@ function InputForm({
   const nextFiscalYearConsensus = nextFiscalYear
     ? consensusRevenues[nextFiscalYear]
     : undefined;
+  const currentFiscalYearConsensusEbit = currentFiscalYear
+    ? consensusEbit[currentFiscalYear]
+    : undefined;
+  const nextFiscalYearConsensusEbit = nextFiscalYear
+    ? consensusEbit[nextFiscalYear]
+    : undefined;
   const quartersReported = forecastContext?.quarters_reported;
   const actualYtdRevenue = forecastContext?.actual_ytd_revenue;
+  const actualYtdOperatingIncome = forecastContext?.actual_ytd_operating_income;
   const nextFiscalYearWeight = forecastContext?.next_fiscal_year_weight;
   const bridgedNtmRevenue = forecastContext?.bridged_ntm_revenue;
+  const bridgedNtmOperatingIncome = forecastContext?.bridged_ntm_operating_income;
   const rollingNtmRevenues = forecastContext?.rolling_ntm_revenues ?? [];
+  const currentOperatingMargin =
+    typeof defaults.operating_income === "number" && defaults.revenues
+      ? defaults.operating_income / defaults.revenues
+      : null;
   const postBridgeEntries = nextFiscalYear
     ? sortedConsensusEntries.filter(
         ([year]) => Number(year) >= Number(nextFiscalYear),
@@ -141,7 +159,7 @@ function InputForm({
     {
       displayLabel: "Target Pre-tax Operating Margin",
       key: "target_pre_tax_operating_margin",
-      tooltip: "Target pre-tax operating margin for the company",
+      tooltip: "Target pre-tax operating margin in steady state.",
       decodeFn: (value: string) => parseFloat(value) / 100,
     },
     {
@@ -202,74 +220,137 @@ function InputForm({
   ];
   const allFields = [...essentialFields, ...advancedFields];
 
-  function renderForecastContext(key: NumericFieldKey) {
-    if (
-      key === "revenue_growth_rate_next_year" &&
-      (typeof bridgedNtmRevenue === "number" || typeof nextFiscalYearConsensus === "number")
-    ) {
-      const segments = [
-        `TTM Base: ${formatAmount(defaults.revenues, true)}`,
+  function getForecastItems(key: NumericFieldKey): { label: string; value: string }[] {
+    if (key === "revenue_growth_rate_next_year") {
+      return [
+        { label: "TTM Revenue", value: formatAmount(defaults.revenues, true) },
         currentFiscalYear &&
         typeof currentFiscalYearConsensus === "number" &&
         typeof actualYtdRevenue === "number"
-          ? `FY${currentFiscalYear} actual YTD: ${formatAmount(actualYtdRevenue, true)} / consensus: ${formatAmount(currentFiscalYearConsensus, true)}`
+          ? { label: `FY${currentFiscalYear} YTD / Consensus`, value: `${formatAmount(actualYtdRevenue, true)} / ${formatAmount(currentFiscalYearConsensus, true)}` }
           : null,
         typeof quartersReported === "number"
-          ? `${quartersReported} quarter${quartersReported === 1 ? "" : "s"} reported`
+          ? { label: "Quarters Reported", value: `${quartersReported}` }
           : null,
         nextFiscalYear && typeof nextFiscalYearConsensus === "number"
-          ? `FY${nextFiscalYear} consensus: ${formatAmount(nextFiscalYearConsensus, true)}`
+          ? { label: `FY${nextFiscalYear} Consensus`, value: formatAmount(nextFiscalYearConsensus, true) }
           : null,
         typeof nextFiscalYearWeight === "number"
-          ? `Next FY weight in NTM: ${formatRate(nextFiscalYearWeight)}`
+          ? { label: "Next FY Weight (NTM)", value: formatRate(nextFiscalYearWeight) }
           : null,
         typeof bridgedNtmRevenue === "number"
-          ? `Bridged NTM: ${formatAmount(bridgedNtmRevenue, true)}`
+          ? { label: "Adjusted NTM", value: formatAmount(bridgedNtmRevenue, true) }
           : null,
         typeof forecastContext?.ms_growth_next_year === "number"
-          ? `Raw FY growth: ${formatRate(forecastContext.ms_growth_next_year)}`
+          ? { label: "Raw FY Growth", value: formatRate(forecastContext.ms_growth_next_year) }
           : null,
-        `Adjusted bridge: ${formatRate(defaults.revenue_growth_rate_next_year)}`,
-      ].filter(Boolean);
-
-      return (
-        <p className="pl-[62%] pr-1 text-[11px] text-muted-foreground/70">
-          {segments.join(" | ")}
-        </p>
-      );
+        { label: "Adjusted Bridge", value: formatRate(defaults.revenue_growth_rate_next_year) },
+      ].filter((x): x is { label: string; value: string } => x !== null);
     }
 
-    if (key === "compounded_annual_revenue_growth_rate" && rollingNtmRevenues.length > 0) {
-      const rollingPath = rollingNtmRevenues
-        .slice(0, 3)
-        .map((value, index) =>
-          index === 0
-            ? `NTM ${formatAmount(value, true)}`
-            : `NTM+${index} ${formatAmount(value, true)}`,
-        )
-        .join(" -> ");
-
-      return (
-        <p className="pl-[62%] pr-1 text-[11px] text-muted-foreground/70">
-          {`Rolling 12M path: ${rollingPath} | Default CAGR: ${formatRate(defaults.compounded_annual_revenue_growth_rate)}`}
-        </p>
-      );
+    if (key === "compounded_annual_revenue_growth_rate") {
+      const items: { label: string; value: string }[] = [];
+      if (rollingNtmRevenues.length > 0) {
+        const path = rollingNtmRevenues
+          .slice(0, 3)
+          .map((v, i) => (i === 0 ? `NTM ${formatAmount(v, true)}` : `NTM+${i} ${formatAmount(v, true)}`))
+          .join(" → ");
+        items.push({ label: "Rolling 12M Path", value: path });
+      } else if (postBridgeEntries.length > 0) {
+        const path = postBridgeEntries
+          .slice(0, 3)
+          .map(([year, v]) => `FY${year} ${formatAmount(v, true)}`)
+          .join(" → ");
+        items.push({ label: "Consensus Path", value: path });
+      }
+      items.push({ label: "Default CAGR", value: formatRate(defaults.compounded_annual_revenue_growth_rate) });
+      return items;
     }
 
-    if (key === "compounded_annual_revenue_growth_rate" && postBridgeEntries.length > 0) {
-      const consensusPath = postBridgeEntries
-        .slice(0, 3)
-        .map(([year, value]) => `FY${year} ${formatAmount(value, true)}`)
-        .join(" -> ");
-
-      return (
-        <p className="pl-[62%] pr-1 text-[11px] text-muted-foreground/70">
-          {`Post-bridge consensus path: ${consensusPath} | Default CAGR: ${formatRate(defaults.compounded_annual_revenue_growth_rate)}`}
-        </p>
-      );
+    if (key === "operating_margin_next_year") {
+      return [
+        typeof currentOperatingMargin === "number"
+          ? {
+              label: "TTM Margin Floor",
+              value: formatRate(currentOperatingMargin),
+            }
+          : null,
+        currentFiscalYear &&
+        typeof currentFiscalYearConsensusEbit === "number" &&
+        typeof actualYtdOperatingIncome === "number"
+          ? {
+              label: `FY${currentFiscalYear} YTD / Consensus EBIT`,
+              value: `${formatAmount(actualYtdOperatingIncome, true)} / ${formatAmount(currentFiscalYearConsensusEbit, true)}`,
+            }
+          : null,
+        nextFiscalYear && typeof nextFiscalYearConsensusEbit === "number"
+          ? {
+              label: `FY${nextFiscalYear} Consensus EBIT`,
+              value: formatAmount(nextFiscalYearConsensusEbit, true),
+            }
+          : null,
+        typeof nextFiscalYearWeight === "number"
+          ? { label: "Next FY Weight (NTM)", value: formatRate(nextFiscalYearWeight) }
+          : null,
+        typeof bridgedNtmOperatingIncome === "number"
+          ? {
+              label: "Bridged NTM EBIT",
+              value: formatAmount(bridgedNtmOperatingIncome, true),
+            }
+          : null,
+        typeof bridgedNtmRevenue === "number"
+          ? { label: "Bridged NTM Revenue", value: formatAmount(bridgedNtmRevenue, true) }
+          : null,
+        typeof bridgedNtmOperatingIncome === "number" &&
+        typeof bridgedNtmRevenue === "number" &&
+        bridgedNtmRevenue !== 0
+          ? {
+              label: "Bridge Formula",
+              value: "NTM EBIT / NTM Revenue",
+            }
+          : null,
+        typeof forecastContext?.ms_margin_next_year === "number"
+          ? {
+              label: "Raw FY Margin",
+              value: formatRate(forecastContext.ms_margin_next_year),
+            }
+          : null,
+        {
+          label: "Adjusted Bridge",
+          value: formatRate(defaults.operating_margin_next_year),
+        },
+      ].filter((x): x is { label: string; value: string } => x !== null);
     }
 
-    return null;
+    return [];
+  }
+
+  function renderForecastContext(key: NumericFieldKey) {
+    const items = getForecastItems(key);
+    if (items.length === 0) return null;
+
+    return (
+      <HoverCard>
+        <HoverCardTrigger asChild>
+          <button
+            type="button"
+            className="ml-auto block text-[10px] text-muted-foreground/50 hover:text-muted-foreground transition-colors pr-1 cursor-help"
+          >
+            view context
+          </button>
+        </HoverCardTrigger>
+        <HoverCardContent align="end" className="w-72">
+          <div className="space-y-1.5">
+            {items.map((item) => (
+              <div key={item.label} className="flex justify-between gap-3 text-[11px]">
+                <span className="text-muted-foreground/60 shrink-0">{item.label}</span>
+                <span className="font-mono text-right">{item.value}</span>
+              </div>
+            ))}
+          </div>
+        </HoverCardContent>
+      </HoverCard>
+    );
   }
 
   function renderInputField(item: FieldValue) {

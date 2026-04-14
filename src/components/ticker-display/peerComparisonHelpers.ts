@@ -4,6 +4,9 @@ export type MetricKey =
   | "netIncome"
   | "ebitda"
   | "ebit"
+  | "pe"
+  | "forwardPe"
+  | "priceToSales"
   | "netProfitMargin"
   | "operatingMargin"
   | "ebitdaMargin"
@@ -21,6 +24,9 @@ export type FinancialComparisonRow = {
   netIncome: number | null;
   ebitda: number | null;
   ebit: number | null;
+  pe: number | null;
+  forwardPe: number | null;
+  priceToSales: number | null;
   netProfitMargin: number | null;
   operatingMargin: number | null;
   ebitdaMargin: number | null;
@@ -36,6 +42,9 @@ export const METRICS: Array<{ key: MetricKey; label: string; higherIsBetter: boo
   { key: "netIncome", label: "Net Income", higherIsBetter: true },
   { key: "ebitda", label: "EBITDA", higherIsBetter: true },
   { key: "ebit", label: "EBIT", higherIsBetter: true },
+  { key: "pe", label: "P/E", higherIsBetter: false },
+  { key: "forwardPe", label: "Forward P/E", higherIsBetter: false },
+  { key: "priceToSales", label: "Price/Sales", higherIsBetter: false },
   { key: "netProfitMargin", label: "Net Profit Margin", higherIsBetter: true },
   { key: "operatingMargin", label: "Operating Margin", higherIsBetter: true },
   { key: "ebitdaMargin", label: "EBITDA Margin", higherIsBetter: true },
@@ -94,8 +103,13 @@ export function getCellBgColor(
   const baseline = Math.abs(baseValue) < 1e-6 ? 1 : Math.abs(baseValue);
   const normalizedDiff = Math.min(Math.abs((value - baseValue) / baseline), 1);
   const alpha = 0.22 + normalizedDiff * 0.38;
-  const isValuationMultiple = key === "evToEbitda" || key === "evToSales";
-  const better = isValuationMultiple && (!higherIsBetter || key === "evToEbitda" || key === "evToSales")
+  const isValuationMultiple =
+    key === "pe" ||
+    key === "forwardPe" ||
+    key === "priceToSales" ||
+    key === "evToEbitda" ||
+    key === "evToSales";
+  const better = isValuationMultiple && !higherIsBetter
     ? value > 0 && (baseValue <= 0 || value < baseValue)
     : higherIsBetter
       ? value > baseValue

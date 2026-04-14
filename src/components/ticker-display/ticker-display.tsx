@@ -47,20 +47,32 @@ export default async function TickerDisplay({
           final_components={final_components}
           date={dcfData.extras.last_updated_financials}
         />
-        <div>
-          <div className="pt-7 flex items-center">
-            <div className="flex-row flex">
-              <p className="text-lg">10 Year Revenue Projections</p>
-              <div className="justify-center items-center ml-3 mt-1">
+        <div className="pt-7">
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <div className="flex flex-col gap-1">
+              <div className="flex flex-row">
+                <p className="text-lg">10 Year Revenue Projections</p>
+                <div className="ml-3 mt-1 items-center justify-center">
+                  <InfoHover
+                    text={
+                      "Revenues are broken down into operating expense, reinvestment to drive future growth and taxes, to get Free Cash Flow to Firm"
+                    }
+                  ></InfoHover>
+                </div>
+              </div>
+            </div>
+            <p className="hidden pt-1 text-[11px] text-muted-foreground sm:block">
+              Values shown above each bar are projected revenues.
+            </p>
+          </div>
+          <div>
+            <div>
                 <InfoHover
                   text={
                     "Revenues are broken down into operating expense, reinvestment to drive future growth and taxes, to get Free Cash Flow to Firm"
                   }
                 ></InfoHover>
-              </div>
             </div>
-          </div>
-          <div>
             <StackedBarChart data={incomeStatementData} labels={revenues} />
           </div>
         </div>

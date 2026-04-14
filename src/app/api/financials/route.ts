@@ -12,6 +12,9 @@ type FinancialRow = {
   netIncome: number | null;
   ebitda: number | null;
   ebit: number | null;
+  pe: number | null;
+  forwardPe: number | null;
+  priceToSales: number | null;
   netProfitMargin: number | null;
   operatingMargin: number | null;
   ebitdaMargin: number | null;
@@ -75,7 +78,22 @@ function mapToComparisonRow(doc: Record<string, unknown>): FinancialRow {
 
   const price = toFiniteNumber(doc.Price);
   const weekHigh = toFiniteNumber(doc["52-Week High"]);
+  const marketCap = toFiniteNumber(doc["Market Cap"]);
   const enterpriseValue = toFiniteNumber(doc["Enterprise Value"]);
+  const pe =
+    toFiniteNumber(doc["P/E"]) ??
+    toFiniteNumber(doc["PE"]) ??
+    toFiniteNumber(doc.trailingPE) ??
+    ratio(marketCap, netIncomeSeries.latest);
+  const forwardPe =
+    toFiniteNumber(doc["Forward PE"]) ??
+    toFiniteNumber(doc["Forward P/E"]) ??
+    toFiniteNumber(doc.forwardPE);
+  const priceToSales =
+    toFiniteNumber(doc["Price to Sales"]) ??
+    toFiniteNumber(doc["Price/Sales"]) ??
+    toFiniteNumber(doc.priceToSalesTrailing12Months) ??
+    ratio(marketCap, revenueSeries.latest);
   const ttmPeriodEnd = typeof doc["TTM Period End"] === "string" ? doc["TTM Period End"] : null;
   const pctOf52WeekHigh =
     price !== null && weekHigh !== null && weekHigh !== 0
@@ -91,6 +109,9 @@ function mapToComparisonRow(doc: Record<string, unknown>): FinancialRow {
     netIncome: netIncomeSeries.latest,
     ebitda: ebitdaSeries.latest,
     ebit: ebitSeries.latest,
+    pe,
+    forwardPe,
+    priceToSales,
     netProfitMargin: ratio(netIncomeSeries.latest, revenueSeries.latest),
     operatingMargin: ratio(ebitSeries.latest, revenueSeries.latest),
     ebitdaMargin: ratio(ebitdaSeries.latest, revenueSeries.latest),

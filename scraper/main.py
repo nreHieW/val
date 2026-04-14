@@ -869,6 +869,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     current_fiscal_year = None
     next_fiscal_year = None
     bridged_ntm_revenue = None
+    bridged_ntm_operating_income = None
     rolling_ntm_revenues = []
     revenue_growth_rate_next_year = forecast_defaults.get("revenue_growth_rate_next_year", 0)
     if fiscal_bridge_context:
@@ -976,13 +977,17 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
                 "last_updated_financials": ttm_income_statement.index[0].strftime("%Y-%m-%d"),
                 "forecast_context": {
                     "consensus_revenues": consensus_revenues_usd,
+                    "consensus_ebit": consensus_ebit_usd,
                     "ms_growth_next_year": forecast_defaults.get("revenue_growth_rate_next_year", 0),
+                    "ms_margin_next_year": forecast_defaults.get("operating_margin_next_year", 0),
                     "current_fiscal_year": current_fiscal_year,
                     "next_fiscal_year": next_fiscal_year,
                     "quarters_reported": fiscal_bridge_context["quarters_reported"] if fiscal_bridge_context else None,
                     "actual_ytd_revenue": fiscal_bridge_context["actual_ytd_revenue"] if fiscal_bridge_context else None,
+                    "actual_ytd_operating_income": fiscal_bridge_context["actual_ytd_operating_income"] if fiscal_bridge_context else None,
                     "next_fiscal_year_weight": fiscal_bridge_context["next_fiscal_year_weight"] if fiscal_bridge_context else None,
                     "bridged_ntm_revenue": bridged_ntm_revenue,
+                    "bridged_ntm_operating_income": bridged_ntm_operating_income,
                     "rolling_ntm_revenues": rolling_ntm_revenues,
                 },
             },
@@ -1080,6 +1085,9 @@ def build_yahoo_profile(ticker, ticker_info):
         "Price": ticker_info.get("currentPrice"),
         "52-Week High": ticker_info.get("fiftyTwoWeekHigh"),
         "52-Week Low": ticker_info.get("fiftyTwoWeekLow"),
+        "P/E": ticker_info.get("trailingPE"),
+        "Forward PE": ticker_info.get("forwardPE"),
+        "Price to Sales": ticker_info.get("priceToSalesTrailing12Months"),
         "Enterprise Value": ticker_info.get("enterpriseValue"),
         "Beta": ticker_info.get("beta"),
     }
@@ -1096,12 +1104,7 @@ def normalize_quarterly_statement(statement: pd.DataFrame) -> pd.DataFrame:
 
 
 def sum_statement_metric(statement: pd.DataFrame, metric_names: list[str], start=0, count=4):
-    if statement.empty:
-        return None
-
     columns = list(statement.columns[start : start + count])
-    if len(columns) == 0:
-        return None
 
     for metric_name in metric_names:
         if metric_name in statement.index:
@@ -1113,8 +1116,6 @@ def sum_statement_metric(statement: pd.DataFrame, metric_names: list[str], start
 
 def compute_ebitda(statement: pd.DataFrame, start=0, count=4):
     ebitda = sum_statement_metric(statement, ["EBITDA"], start=start, count=count)
-    if ebitda is not None:
-        return ebitda
 
     ebit = sum_statement_metric(statement, ["EBIT", "Operating Income"], start=start, count=count)
     depreciation = sum_statement_metric(

@@ -19,13 +19,17 @@ export type UserDCFInputs = {
 
 export type ForecastContext = {
   consensus_revenues?: Record<string, number>;
+  consensus_ebit?: Record<string, number>;
   ms_growth_next_year?: number;
+  ms_margin_next_year?: number;
   current_fiscal_year?: string | null;
   next_fiscal_year?: string;
   quarters_reported?: number | null;
   actual_ytd_revenue?: number | null;
+  actual_ytd_operating_income?: number | null;
   next_fiscal_year_weight?: number | null;
   bridged_ntm_revenue?: number | null;
+  bridged_ntm_operating_income?: number | null;
   rolling_ntm_revenues?: number[];
 };
 

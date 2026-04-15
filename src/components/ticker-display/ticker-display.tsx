@@ -66,13 +66,6 @@ export default async function TickerDisplay({
             </p>
           </div>
           <div>
-            <div>
-                <InfoHover
-                  text={
-                    "Revenues are broken down into operating expense, reinvestment to drive future growth and taxes, to get Free Cash Flow to Firm"
-                  }
-                ></InfoHover>
-            </div>
             <StackedBarChart data={incomeStatementData} labels={revenues} />
           </div>
         </div>

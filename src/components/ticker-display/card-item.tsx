@@ -1,10 +1,3 @@
-import {
-  Card,
-  CardContent,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { ReactNode } from "react";
 import InfoHover from "../info-hover";
 
@@ -20,21 +13,18 @@ const CardItem = async ({
   tooltip?: string;
 }) => {
   return (
-    <Card className="w-100 h-full flex flex-col bg-slate-50 dark:bg-zinc-950">
-      <CardHeader>
-        <CardTitle>
-          <div className="flex flex-row">
-            {title}
-            <div className="ml-2">
-              {" "}
-              <InfoHover text={tooltip || ""}></InfoHover>
-            </div>
-          </div>
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="text-sm">{children}</CardContent>
-      <CardFooter className="mt-auto">{footerChildren}</CardFooter>
-    </Card>
+    <div className="h-full flex flex-col rounded-lg border border-border/50 px-4 py-4 sm:px-5 sm:py-5">
+      <div className="flex items-center gap-2 mb-4">
+        <h3 className="text-xs font-medium tracking-tight">{title}</h3>
+        <InfoHover text={tooltip || ""} />
+      </div>
+      <div className="text-sm">{children}</div>
+      {footerChildren && (
+        <div className="mt-auto pt-4 text-xxs text-muted-foreground/60">
+          {footerChildren}
+        </div>
+      )}
+    </div>
   );
 };
 

@@ -22,11 +22,9 @@ export const getTickers = async (
   return response.json();
 };
 
-
-
 export default function SearchBar() {
   const [searchQuery, setSearchQuery] = useState("");
-  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState(""); // To prevent overcall
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
   const [items, setItems] = useState<TickerResult[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
@@ -66,7 +64,6 @@ export default function SearchBar() {
         setItems(results);
       } catch (error) {
         if ((error as DOMException).name !== "AbortError") {
-          console.error(error);
           setItems([]);
         }
       } finally {
@@ -81,6 +78,7 @@ export default function SearchBar() {
       controller.abort();
     };
   }, [debouncedSearchQuery]);
+
   const handleKeyDown = (event: React.KeyboardEvent) => {
     if (event.key === 'Enter' && items.length > 0) {
       const firstItem = items[0];
@@ -92,11 +90,16 @@ export default function SearchBar() {
       router.push(`/ticker/${urlSlug}`);
     }
   };
+
+  const hasResults = items.length > 0 && searchQuery.length > 0 && !isLoading;
+
   return (
     <div className="w-full min-w-0">
       <input
         type="text"
-        className="search w-full py-3 px-5 dark:outline-white outline outline-1 outline-zinc-950 rounded-full z-40"
+        className={`w-full py-3 px-5 border border-border bg-background text-sm placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring transition-shadow ${
+          hasResults ? "rounded-t-3xl rounded-b-xl" : "rounded-full"
+        }`}
         value={searchQuery}
         placeholder="Search for a ticker..."
         spellCheck="false"
@@ -105,11 +108,11 @@ export default function SearchBar() {
         onKeyDown={handleKeyDown}
       />
       {isLoading ? (
-        <div className="py-8 justify-center flex">
+        <div className="py-6 justify-center flex">
           <Loading />
         </div>
-      ) : items.length > 0 && searchQuery.length > 0 ? (
-        <ul className="results-list py-2 w-full min-w-0 max-h-64 overflow-auto scrollbar scrollbar-track-transparent dark:scrollbar-thumb-white scrollbar-thumb-black bg-transparent">
+      ) : hasResults ? (
+        <ul className="py-1.5 mt-0.5 w-full min-w-0 max-h-64 overflow-auto rounded-b-2xl border border-border bg-background scrollbar-thin scrollbar-track-transparent scrollbar-thumb-border">
           {items.map((item: TickerResult, index) => {
             const ticker = item.Ticker;
             const name = item.name;
@@ -130,7 +133,7 @@ export default function SearchBar() {
       ) : (
         debouncedSearchQuery.length > 0 &&
         items.length === 0 && (
-          <div className="text-center text-sm py-5">No results found</div>
+          <div className="text-center text-xs text-muted-foreground py-4">No results found</div>
         )
       )}
     </div>
@@ -144,7 +147,7 @@ interface SearchItemProps {
 
 function SearchItem({ text, url }: SearchItemProps) {
   return (
-    <li className="pt-1 text-sm hover:dark:bg-zinc-700 hover:py-1 hover:rounded px-5 hover:bg-zinc-300 w-full min-w-0 z-0">
+    <li className="text-xs px-4 py-1.5 hover:bg-accent transition-colors w-full min-w-0">
       <Link href={url} className="inline-block w-full truncate">{text}</Link>
     </li>
   );

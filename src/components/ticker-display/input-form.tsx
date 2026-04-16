@@ -327,19 +327,21 @@ function InputForm({
 
   function renderForecastContext(key: NumericFieldKey) {
     const items = getForecastItems(key);
-    if (items.length === 0) return null;
+    if (items.length === 0) {
+      return null;
+    }
 
     return (
       <HoverCard>
         <HoverCardTrigger asChild>
           <button
             type="button"
-            className="ml-auto block text-[10px] text-muted-foreground/50 hover:text-muted-foreground transition-colors pr-1 cursor-help"
+            className="text-[10px] leading-none text-muted-foreground/50 hover:text-muted-foreground transition-colors cursor-help w-fit"
           >
             view context
           </button>
         </HoverCardTrigger>
-        <HoverCardContent align="end" className="w-72">
+        <HoverCardContent align="start" className="w-72">
           <div className="space-y-1.5">
             {items.map((item) => (
               <div key={item.label} className="flex justify-between gap-3 text-[11px]">
@@ -355,33 +357,35 @@ function InputForm({
 
   function renderInputField(item: FieldValue) {
     return (
-      <div key={item.key} className="space-y-1">
-        <FormField
-          control={form.control}
-          name={item.key}
-          render={({ field }) => (
-            <FormItem className="flex">
-              <FormLabel className="place-content-center pr-2 text-xs w-3/5">
-                {item.displayLabel}
-              </FormLabel>{" "}
-              <div className="pt-2 pr-8 ">
+      <FormField
+        key={item.key}
+        control={form.control}
+        name={item.key}
+        render={({ field }) => (
+          <FormItem className="flex items-center justify-between gap-4 space-y-0 py-1">
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-1.5">
+                <FormLabel className="text-xs leading-snug">
+                  {item.displayLabel}
+                </FormLabel>
                 <InfoHover text={item.tooltip} />
               </div>
-              <FormControl>
-                <div className="w-full pr-1">
-                  <Input
-                    {...field}
-                    placeholder={formDefaults[item.key]?.toFixed(2)}
-                    value={field.value}
-                  />
-                  <FormMessage className="text-xs mt-1" />
-                </div>
-              </FormControl>
-            </FormItem>
-          )}
-        />
-        {renderForecastContext(item.key)}
-      </div>
+              {renderForecastContext(item.key)}
+            </div>
+            <FormControl>
+              <div className="w-28 shrink-0">
+                <Input
+                  {...field}
+                  className="h-8 text-right"
+                  placeholder={formDefaults[item.key]?.toFixed(2)}
+                  value={field.value}
+                />
+                <FormMessage className="text-xxs mt-1" />
+              </div>
+            </FormControl>
+          </FormItem>
+        )}
+      />
     );
   }
 
@@ -407,20 +411,23 @@ function InputForm({
         <AccordionItem value="inputs" className="w-full">
           <AccordionTrigger>Inputs</AccordionTrigger>
           <AccordionContent>
-            <p className="text-xxs text-muted-foreground/40 text-right">
-              For more details on each input, please visit{" "}
-              <a href="/about#inputs_description" className="underline"
-            target="_blank" rel="noopener noreferrer">
-                here
-        </a>
-            </p>
-            <p className="text-xs text-muted-foreground/60 pb-3">
-              All values are in USD Millions or Percentages
-            </p>
+            <div className="flex items-baseline justify-between gap-4 mb-4">
+              <p className="text-xs text-muted-foreground/50">
+                All values in USD Millions or Percentages
+              </p>
+              <a
+                href="/about#inputs_description"
+                className="text-xxs text-muted-foreground/40 hover:text-muted-foreground/60 transition-colors underline underline-offset-2 shrink-0"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Input details
+              </a>
+            </div>
             <Form {...form}>
               <form
                 onSubmit={form.handleSubmit(onSubmit)}
-                className="flex flex-col space-y-2"
+                className="flex flex-col space-y-3"
                 id="inputs"
               >
                 {essentialFields.map((item: FieldValue) => renderInputField(item))}
@@ -429,7 +436,7 @@ function InputForm({
                     <AccordionTrigger className="text-sm">
                       Advanced
                     </AccordionTrigger>
-                    <AccordionContent className="space-y-2 pt-1">
+                    <AccordionContent className="space-y-3 pt-2">
                       {advancedFields.map((item: FieldValue) =>
                         renderInputField(item),
                       )}
@@ -437,32 +444,30 @@ function InputForm({
                         control={form.control}
                         name="adjust_r_and_d"
                         render={({ field }) => (
-                          <FormItem className="flex">
-                            <FormLabel className="place-content-center text-xs w-3/5 pr-1">
-                              Adjust R&D Expense
-                            </FormLabel>
-                            <div className="pt-1 pr-8">
+                          <FormItem className="flex items-center justify-between gap-4 space-y-0 py-1">
+                            <div className="flex items-center gap-1.5">
+                              <FormLabel className="text-xs leading-snug">
+                                Adjust R&D Expense
+                              </FormLabel>
                               <InfoHover
-                                text={
-                                  "Capitalize R and D expenses as assets. Used to determine sales/capital ratio"
-                                }
+                                text="Capitalize R and D expenses as assets. Used to determine sales/capital ratio"
                               />
                             </div>
-                            <div className="w-full">
-                              <FormControl>
+                            <FormControl>
+                              <div className="w-28 shrink-0 flex justify-end">
                                 <Switch
                                   checked={field.value}
                                   onCheckedChange={field.onChange}
                                 />
-                              </FormControl>
-                            </div>
+                              </div>
+                            </FormControl>
                           </FormItem>
                         )}
                       />
                     </AccordionContent>
                   </AccordionItem>
                 </Accordion>
-                <div className="self-end pt-3">
+                <div className="flex justify-end gap-3 pt-5">
                   <Button
                     onClick={() => {
                       reset(
@@ -473,12 +478,12 @@ function InputForm({
                         )
                       );
                     }}
-                    variant={"outline"}
-                    className="mr-5"
+                    variant="outline"
+                    size="sm"
                   >
                     <Link href={baseUrl}>Revert</Link>
                   </Button>
-                  <Button type="submit" variant={"outline"}>
+                  <Button type="submit" variant="outline" size="sm">
                     Submit
                   </Button>
                 </div>

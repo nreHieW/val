@@ -64,6 +64,10 @@ const config = {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        signal: {
+          positive: "hsl(var(--signal-positive))",
+          negative: "hsl(var(--signal-negative))",
+        },
       },
       borderRadius: {
         lg: "var(--radius)",

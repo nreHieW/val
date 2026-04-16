@@ -1,10 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { getTickers } from "../searchbar/search-bar";
-import { Button } from "../ui/button";
 import PeerMetricsTable from "./peer-metrics-table";
 import {
   FinancialComparisonRow,
@@ -57,9 +56,11 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
     parsePeers(searchParams.get("peers"), normalizedMainTicker),
   );
   const [rows, setRows] = useState<FinancialComparisonRow[]>([]);
+  const [isLoadingRows, setIsLoadingRows] = useState(false);
   const [visibleMetrics, setVisibleMetrics] = useState<MetricKey[]>(() =>
     parseVisibleMetrics(searchParams.get("metrics")),
   );
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -120,6 +121,7 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
   useEffect(() => {
     const tickers = [normalizedMainTicker, ...peers];
     const controller = new AbortController();
+    setIsLoadingRows(true);
     fetch(`/api/financials?tickers=${encodeURIComponent(tickers.join(","))}`, {
       signal: controller.signal,
       cache: "no-store",
@@ -142,6 +144,11 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
       .catch((error) => {
         if ((error as DOMException).name !== "AbortError") {
           setRows([]);
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setIsLoadingRows(false);
         }
       });
 
@@ -167,6 +174,7 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
     setSearchQuery("");
     setDebouncedSearchQuery("");
     setSearchResults([]);
+    searchInputRef.current?.focus();
   }
 
   function removePeer(tickerToRemove: string) {
@@ -182,61 +190,68 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
     });
   }
 
-  return (
-    <div className="space-y-4 pt-3">
-      <div className="rounded border p-3">
-        <p className="text-xs text-muted-foreground pb-2">
-          Add peer companies to compare against {normalizedMainTicker}.
-        </p>
-        <input
-          type="text"
-          value={searchQuery}
-          onChange={(event) => setSearchQuery(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && normalizedResults.length > 0) {
-              addPeer(normalizedResults[0].Ticker);
-            }
-          }}
-          placeholder="Search ticker..."
-          className="w-full rounded border px-3 py-2 text-sm outline-none focus:ring-1"
-          spellCheck="false"
-          autoCorrect="off"
-        />
-        {searchQuery.length > 0 && normalizedResults.length === 0 ? (
-          <p className="pt-2 text-xs text-muted-foreground">No matching tickers.</p>
-        ) : null}
-        {normalizedResults.length > 0 ? (
-          <ul className="mt-2 max-h-48 overflow-auto rounded border bg-background">
-            {normalizedResults.slice(0, 10).map((result) => (
-              <li key={result.Ticker}>
-                <button
-                  type="button"
-                  className="w-full px-3 py-2 text-left text-xs hover:bg-muted/60"
-                  onClick={() => addPeer(result.Ticker)}
-                >
-                  {result.Ticker} - {result.name}
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-      </div>
+  const showDropdown = searchQuery.length > 0 && normalizedResults.length > 0;
+  const showNoResults =
+    searchQuery.length > 0 &&
+    debouncedSearchQuery.length > 0 &&
+    normalizedResults.length === 0;
 
-      <div className="rounded border p-3">
-        <p className="pb-2 text-xs font-medium">Companies</p>
-        <div className="flex flex-wrap gap-2">
-          <span className="inline-flex items-center rounded border bg-muted/60 px-2 py-1 text-xs font-semibold">
-            {normalizedMainTicker} (Main)
+  return (
+    <div className="space-y-6 pt-2">
+      {/* Search & peer chips */}
+      <div>
+        <div className="relative">
+          <input
+            ref={searchInputRef}
+            type="text"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && normalizedResults.length > 0) {
+                addPeer(normalizedResults[0].Ticker);
+              }
+            }}
+            placeholder="Add a peer company..."
+            className="w-full rounded-md border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground/50 outline-none transition-shadow focus:ring-1 focus:ring-ring"
+            spellCheck="false"
+            autoCorrect="off"
+          />
+          {showNoResults && (
+            <p className="absolute left-0 top-full mt-1 text-xs text-muted-foreground">
+              No matching tickers.
+            </p>
+          )}
+          {showDropdown && (
+            <ul className="absolute left-0 right-0 top-full z-30 mt-1 max-h-48 overflow-auto rounded-md border bg-background shadow-md scrollbar-thin scrollbar-track-transparent scrollbar-thumb-border">
+              {normalizedResults.slice(0, 10).map((result) => (
+                <li key={result.Ticker}>
+                  <button
+                    type="button"
+                    className="w-full px-3 py-2 text-left text-xs transition-colors hover:bg-muted/60"
+                    onClick={() => addPeer(result.Ticker)}
+                  >
+                    <span className="font-medium">{result.Ticker}</span>
+                    <span className="text-muted-foreground"> — {result.name}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className={`flex flex-wrap items-center gap-2 ${showNoResults ? "mt-8" : "mt-3"}`}>
+          <span className="inline-flex items-center rounded-md bg-foreground/[0.06] px-2.5 py-1 text-xs font-semibold">
+            {normalizedMainTicker}
           </span>
           {peers.map((peerTicker) => (
             <span
               key={peerTicker}
-              className="inline-flex items-center rounded border px-2 py-1 text-xs"
+              className="group inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs transition-colors"
             >
               {peerTicker}
               <button
                 type="button"
-                className="ml-1 inline-flex items-center"
+                className="rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 onClick={() => removePeer(peerTicker)}
                 aria-label={`Remove ${peerTicker}`}
               >
@@ -244,22 +259,22 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
               </button>
             </span>
           ))}
-          {peers.length > 0 ? (
-            <Button
+          {peers.length > 0 && (
+            <button
               type="button"
-              variant="outline"
-              className="h-6 px-2 text-xs"
+              className="text-xs text-muted-foreground transition-colors hover:text-foreground"
               onClick={() => setPeers([])}
             >
-              Clear Peers
-            </Button>
-          ) : null}
+              Clear all
+            </button>
+          )}
         </div>
       </div>
 
-      <div className="rounded border p-3">
-        <p className="pb-2 text-xs font-medium">Visible Metrics</p>
-        <div className="flex flex-wrap gap-2">
+      {/* Metric toggles */}
+      <div>
+        <p className="pb-2 text-xs font-medium text-muted-foreground">Metrics</p>
+        <div className="flex flex-wrap gap-1.5">
           {METRICS.map((metric) => {
             const isActive = visibleMetrics.includes(metric.key);
             return (
@@ -267,8 +282,10 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
                 key={metric.key}
                 type="button"
                 onClick={() => toggleMetric(metric.key)}
-                className={`rounded border px-2 py-1 text-xs ${
-                  isActive ? "bg-muted/80 font-medium" : "opacity-70"
+                className={`rounded-md border px-2 py-1 text-xs transition-colors ${
+                  isActive
+                    ? "border-foreground/20 bg-foreground/[0.06] font-medium text-foreground"
+                    : "border-transparent text-muted-foreground/60 hover:text-muted-foreground"
                 }`}
               >
                 {metric.label}
@@ -278,11 +295,14 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
         </div>
       </div>
 
-      <PeerMetricsTable
-        rows={rows}
-        mainTicker={normalizedMainTicker}
-        visibleMetrics={visibleMetrics}
-      />
+      {/* Table */}
+      <div className={isLoadingRows ? "opacity-60 transition-opacity" : "transition-opacity"}>
+        <PeerMetricsTable
+          rows={rows}
+          mainTicker={normalizedMainTicker}
+          visibleMetrics={visibleMetrics}
+        />
+      </div>
     </div>
   );
 }

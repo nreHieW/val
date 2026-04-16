@@ -4,14 +4,15 @@ import {
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
 import { Info } from "lucide-react";
+
 export default function InfoHover({ text }: { text: string }) {
   return (
     <HoverCard>
-      <HoverCardTrigger style={{ opacity: "30%" }} className="h-full hidden sm:flex">
-        <Info style={{ width: "0.9em", height: "0.9em" }}/>
+      <HoverCardTrigger className="hidden sm:inline-flex text-muted-foreground/30 hover:text-muted-foreground/50 transition-colors">
+        <Info className="h-3.5 w-3.5" />
       </HoverCardTrigger>
       <HoverCardContent>
-        <p className="py-0 px-0" style={{opacity: "40%", fontSize: "0.7rem", lineHeight:"1.1rem"}}>{text}</p>
+        <p className="text-xxs leading-relaxed text-muted-foreground/60">{text}</p>
       </HoverCardContent>
     </HoverCard>
   );

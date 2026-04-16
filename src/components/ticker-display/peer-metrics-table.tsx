@@ -19,8 +19,8 @@ export default function PeerMetricsTable({
 }) {
   if (rows.length === 0) {
     return (
-      <div className="rounded border border-dashed p-4 text-xs text-muted-foreground">
-        No comparison data available for the selected tickers.
+      <div className="rounded-md border border-dashed px-4 py-8 text-center text-xs text-muted-foreground">
+        Add peer companies above to compare financials.
       </div>
     );
   }
@@ -31,33 +31,45 @@ export default function PeerMetricsTable({
   const visibleMetricDefinitions = METRICS.filter((metric) =>
     visibleMetrics.includes(metric.key),
   );
-  const companyColumnClass =
-    "sticky left-0 z-20 min-w-[220px] max-w-[220px] border-r border-border px-3 py-2";
+
+  const stickyColBase =
+    "sticky left-0 min-w-[200px] max-w-[200px] border-r border-border px-3 py-2.5";
+  const stickyTh = `${stickyColBase} z-30`;
+  const stickyTd = `${stickyColBase} z-20`;
+  const stickyShadow =
+    "shadow-[6px_0_8px_-4px_hsl(var(--border)/0.6)]";
 
   return (
-    <div className="w-full overflow-x-auto rounded border bg-background pb-5">
-      <table className="w-full min-w-[900px] text-xs">
+    <div className="w-full overflow-x-auto rounded-md border bg-background">
+      <table className="w-full min-w-[800px] text-xs">
         <thead>
-          <tr className="bg-muted/40">
+          <tr className="border-b">
             <th
-              className={`${companyColumnClass} bg-background text-left font-medium shadow-[8px_0_12px_-8px_rgba(0,0,0,0.65)]`}
+              className={`${stickyTh} ${stickyShadow} bg-muted text-left font-medium`}
             >
               Company
             </th>
             {visibleMetricDefinitions.map((metric) => (
-              <th key={metric.key} className="whitespace-nowrap px-3 py-2 text-right font-medium">
+              <th
+                key={metric.key}
+                className="whitespace-nowrap bg-muted px-3 py-2.5 text-right font-medium"
+              >
                 {metric.label}
               </th>
             ))}
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => {
+          {rows.map((row, index) => {
             const isMain = row.Ticker.toUpperCase() === mainTicker.toUpperCase();
+            const isLast = index === rows.length - 1;
             return (
-              <tr key={row.Ticker} className="border-t">
+              <tr
+                key={row.Ticker}
+                className={`transition-colors hover:bg-muted/20 ${isLast ? "" : "border-b"}`}
+              >
                 <td
-                  className={`${companyColumnClass} shadow-[8px_0_12px_-8px_rgba(0,0,0,0.65)] ${
+                  className={`${stickyTd} ${stickyShadow} ${
                     isMain ? "bg-muted font-semibold" : "bg-background"
                   }`}
                 >
@@ -68,7 +80,7 @@ export default function PeerMetricsTable({
                     </span>
                   ) : null}
                   {row.ttmPeriodEnd ? (
-                    <span className="block truncate text-[11px] font-normal text-muted-foreground/80">
+                    <span className="block truncate text-xxs font-normal text-muted-foreground/70">
                       TTM through {row.ttmPeriodEnd}
                     </span>
                   ) : null}
@@ -83,7 +95,7 @@ export default function PeerMetricsTable({
                   return (
                     <td
                       key={`${row.Ticker}-${metric.key}`}
-                      className="px-3 py-2 text-right tabular-nums transition-colors"
+                      className="px-3 py-2.5 text-right tabular-nums"
                       style={bgColor ? { backgroundColor: bgColor } : undefined}
                     >
                       {formatMetricValue(metric.key as MetricKey, value)}

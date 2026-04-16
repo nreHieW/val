@@ -33,31 +33,43 @@ export default function TickerDisplayTabs({
 
   return (
     <div>
-      <div className="mb-4 flex gap-2 border-b">
+      <nav className="mb-8 flex gap-6 border-b border-border/60" role="tablist">
         <button
           type="button"
-          className={`rounded-t px-3 py-2 text-sm ${
-            activeTab === "dcf" ? "border border-b-0 font-semibold" : "opacity-70"
+          role="tab"
+          aria-selected={activeTab === "dcf"}
+          className={`relative pb-2.5 text-sm transition-colors ${
+            activeTab === "dcf"
+              ? "font-medium text-foreground"
+              : "text-muted-foreground hover:text-foreground/80"
           }`}
           onClick={() => setTab("dcf")}
         >
           DCF Model
+          {activeTab === "dcf" && (
+            <span className="absolute inset-x-0 -bottom-px h-[1.5px] rounded-full bg-foreground" />
+          )}
         </button>
         <button
           type="button"
-          className={`rounded-t px-3 py-2 text-sm ${
+          role="tab"
+          aria-selected={activeTab === "comparison"}
+          className={`relative pb-2.5 text-sm transition-colors ${
             activeTab === "comparison"
-              ? "border border-b-0 font-semibold"
-              : "opacity-70"
+              ? "font-medium text-foreground"
+              : "text-muted-foreground hover:text-foreground/80"
           }`}
           onClick={() => setTab("comparison")}
         >
           Company Comparison
+          {activeTab === "comparison" && (
+            <span className="absolute inset-x-0 -bottom-px h-[1.5px] rounded-full bg-foreground" />
+          )}
         </button>
-      </div>
+      </nav>
 
-      <div className={activeTab === "dcf" ? "block" : "hidden"}>{children}</div>
-      <div className={activeTab === "comparison" ? "block" : "hidden"}>
+      <div role="tabpanel" className={activeTab === "dcf" ? "block" : "hidden"}>{children}</div>
+      <div role="tabpanel" className={activeTab === "comparison" ? "block" : "hidden"}>
         <PeerComparisonTab ticker={ticker} />
       </div>
     </div>

@@ -3,14 +3,12 @@ import { ModeToggle } from "./mode-toggle";
 
 export default function MainHeader({ children }: { children?: React.ReactNode }) {
   return (
-    <div className="flex-row flex py-10 justify-between">
-      <div className="w-1/2">
-        <Logo />
-      </div>
-      <div className="flex justify-end items-center">
+    <header className="flex items-center justify-between py-6 sm:py-8">
+      <Logo />
+      <div className="flex items-center gap-3">
         {children}
-        <ModeToggle></ModeToggle>
+        <ModeToggle />
       </div>
-    </div>
+    </header>
   );
 }

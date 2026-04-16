@@ -116,6 +116,6 @@ export function getCellBgColor(
       : value < baseValue;
 
   return better
-    ? `rgba(22, 163, 74, ${alpha.toFixed(3)})`
-    : `rgba(220, 38, 38, ${alpha.toFixed(3)})`;
+    ? `hsl(var(--signal-positive) / ${alpha.toFixed(3)})`
+    : `hsl(var(--signal-negative) / ${alpha.toFixed(3)})`;
 }

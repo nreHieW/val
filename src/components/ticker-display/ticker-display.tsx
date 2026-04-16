@@ -68,7 +68,7 @@ export default async function TickerDisplay({
               tooltip="Cash flows are discounted at the cost of capital which is calculated using the CAPM model."
               footerChildren={
                 <span>
-                  Cost of Capital: {formatAmount(df[0].cost_of_capital * 100)}%
+                  Cost of Capital: {formatAmount(df[0].cost_of_capital * 100)}
                 </span>
               }
             >

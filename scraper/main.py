@@ -776,6 +776,13 @@ def r_and_d_handler(ticker, industry):
     return expenses
 
 
+def _balance_sheet_scalar(df: pd.DataFrame, key: str, default: float = 0) -> float:
+    """First value for a Yahoo line item. If the column exists but is all-NaN, iloc[0] is NaN — use default."""
+    series = df.get(key, pd.Series([default]))
+    val = series.iloc[0]
+    return float(default) if pd.isna(val) else float(val)
+
+
 def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper, avg_metrics: dict, industry_mapper: StringMapper, mature_erp: float, risk_free_rate: float, fx_rates: dict):
     # Defaults
     average_maturity = 5
@@ -828,11 +835,15 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     revenues = revenue_series.sum()
     operating_income_ttm = operating_income_series.sum()
     interest_expense = interest_expense_series.sum()
-    book_value_of_equity = last_balance_sheet.get("Stockholders Equity", pd.Series([0])).iloc[0]
-    book_value_of_debt = last_balance_sheet.get("Total Debt", pd.Series([0])).iloc[0]
-    cash_and_marketable_securities = last_balance_sheet.get("Cash Cash Equivalents And Short Term Investments", pd.Series([0])).iloc[0]
-    cross_holdings_and_other_non_operating_assets = last_balance_sheet.get("Investments And Advances", pd.Series([0])).iloc[0]
-    minority_interest = last_balance_sheet.get("Minority Interest", pd.Series([0])).iloc[0]  # by right. should convert to market value
+    book_value_of_equity = _balance_sheet_scalar(last_balance_sheet, "Stockholders Equity")
+    book_value_of_debt = _balance_sheet_scalar(last_balance_sheet, "Total Debt")
+    cash_and_marketable_securities = _balance_sheet_scalar(
+        last_balance_sheet, "Cash Cash Equivalents And Short Term Investments"
+    )
+    cross_holdings_and_other_non_operating_assets = _balance_sheet_scalar(
+        last_balance_sheet, "Investments And Advances"
+    )
+    minority_interest = _balance_sheet_scalar(last_balance_sheet, "Minority Interest")  # by right. should convert to market value
     number_of_shares_outstanding = info.get("sharesOutstanding", 0)
     curr_price = info.get("previousClose", 0)
     pretax_income_total = pretax_income_series.sum()

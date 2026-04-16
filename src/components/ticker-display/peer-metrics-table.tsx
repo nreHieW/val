@@ -40,7 +40,65 @@ export default function PeerMetricsTable({
     "shadow-[6px_0_8px_-4px_hsl(var(--border)/0.6)]";
 
   return (
-    <div className="w-full overflow-x-auto rounded-md border bg-background">
+    <div className="w-full space-y-4">
+      {/* Mobile: one card per company — avoids two-axis horizontal scroll */}
+      <div className="md:hidden space-y-3">
+        {rows.map((row) => {
+          const isMain = row.Ticker.toUpperCase() === mainTicker.toUpperCase();
+          return (
+            <section
+              key={row.Ticker}
+              className={`rounded-lg border bg-background p-3 ${
+                isMain ? "border-foreground/20 bg-muted/40 shadow-sm" : "border-border"
+              }`}
+              aria-label={`${row.Ticker} metrics`}
+            >
+              <header className="border-b border-border/60 pb-2.5">
+                <p className="text-sm font-semibold leading-tight">{row.Ticker}</p>
+                {row.Name ? (
+                  <p className="mt-0.5 text-xs text-muted-foreground">{row.Name}</p>
+                ) : null}
+                {row.ttmPeriodEnd ? (
+                  <p className="mt-1 text-xxs text-muted-foreground/80">
+                    TTM through {row.ttmPeriodEnd}
+                  </p>
+                ) : null}
+              </header>
+              <dl className="divide-y divide-border/50">
+                {visibleMetricDefinitions.map((metric) => {
+                  const value = row[metric.key];
+                  const baseValue = mainRow[metric.key];
+                  const bgColor = isMain
+                    ? undefined
+                    : getCellBgColor(
+                        metric.key,
+                        value,
+                        baseValue,
+                        metric.higherIsBetter,
+                      );
+
+                  return (
+                    <div
+                      key={metric.key}
+                      className="flex min-h-[44px] items-center justify-between gap-3 py-2"
+                      style={bgColor ? { backgroundColor: bgColor } : undefined}
+                    >
+                      <dt className="max-w-[55%] text-xs leading-snug text-muted-foreground">
+                        {metric.label}
+                      </dt>
+                      <dd className="text-right text-sm tabular-nums">
+                        {formatMetricValue(metric.key as MetricKey, value)}
+                      </dd>
+                    </div>
+                  );
+                })}
+              </dl>
+            </section>
+          );
+        })}
+      </div>
+
+      <div className="hidden w-full overflow-x-auto rounded-md border bg-background md:block">
       <table className="w-full min-w-[800px] text-xs">
         <thead>
           <tr className="border-b">
@@ -107,6 +165,7 @@ export default function PeerMetricsTable({
           })}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

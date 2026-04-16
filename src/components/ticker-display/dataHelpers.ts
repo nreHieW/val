@@ -80,20 +80,10 @@ const DCFInputKeys = [
 export function constructModellingData(data: any): DCFInputData {
   const result: Partial<DCFInputData> = {};
   DCFInputKeys.forEach((key) => {
-    if (key in data) {
-      result[key as keyof DCFInputData] = data[key];
-    } else {
-      result[key as keyof DCFInputData] = 0;
-    }
+    const v = data[key];
+    result[key as keyof DCFInputData] = v != null ? v : 0;
   });
   result.r_and_d_expenses = data.extras?.research_and_development ?? [0];
-
-  // Loop through the result and replace undefined values with 0
-  for (const key in result) {
-    if (result[key as keyof DCFInputData] === undefined) {
-      result[key as keyof DCFInputData] = 0;
-    }
-  }
 
   return result as DCFInputData;
 }
@@ -119,7 +109,13 @@ export function decodeInputs(encoding: string): UserDCFInputs {
   return data as UserDCFInputs;
 }
 
-export function formatAmount(value: number, money: boolean = false): string {
+export function formatAmount(
+  value: number | null | undefined,
+  money: boolean = false
+): string {
+  if (value == null || Number.isNaN(value)) {
+    return "—";
+  }
   if (Math.abs(value) >= 1e9) {
     return `$${(value / 1e9).toFixed(2)}B`;
   } else if (Math.abs(value) >= 1e6) {

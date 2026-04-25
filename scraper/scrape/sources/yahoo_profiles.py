@@ -2,11 +2,10 @@ import concurrent.futures
 import time
 
 import pandas as pd
-from requests.exceptions import HTTPError
+import yfinance as yf
 from yfinance.exceptions import YFRateLimitError
 
 from scrape.core.config import YAHOO_INFO_MAX_WORKERS, YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS
-from scrape.core.yahoo_client import yahoo_ticker
 
 
 def build_yahoo_profile(ticker, ticker_info):
@@ -73,10 +72,10 @@ def compute_ebitda(statement: pd.DataFrame, start=0, count=4):
 def get_ttm_financials(ticker):
     for attempt in range(YAHOO_INFO_RETRIES):
         try:
-            yf_ticker = yahoo_ticker(ticker)
+            yf_ticker = yf.Ticker(ticker)
             quarterly_income_stmt = normalize_quarterly_statement(yf_ticker.quarterly_income_stmt)
             if quarterly_income_stmt.empty:
-                raise ValueError(f"No quarterly income statement for {ticker}")
+                return None
 
             most_recent_quarter = quarterly_income_stmt.columns[0]
             result = {
@@ -124,12 +123,17 @@ def get_ttm_financials(ticker):
                 "TTM Period End": pd.Timestamp(most_recent_quarter).strftime("%Y-%m-%d"),
             }
             return result
-        except (HTTPError, YFRateLimitError):
+        except YFRateLimitError:
             if attempt == YAHOO_INFO_RETRIES - 1:
-                raise
+                print(f"[ERROR] Yahoo rate limited for {ticker} TTM after {YAHOO_INFO_RETRIES} attempts")
+                return None
+
             sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1)
-            print(f"[WARN] Yahoo request failed for {ticker} TTM; retrying in {sleep_seconds:.1f}s")
+            print(f"[WARN] Yahoo rate limited for {ticker} TTM; retrying in {sleep_seconds:.1f}s")
             time.sleep(sleep_seconds)
+        except Exception as e:
+            print(f"[ERROR] Failed to fetch TTM financials for {ticker}: {e}")
+            return None
 
 
 def compute_ttm_financials(tickers):
@@ -139,7 +143,8 @@ def compute_ttm_financials(tickers):
         with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_INFO_MAX_WORKERS) as executor:
             results = list(executor.map(get_ttm_financials, batch))
         for result in results:
-            ttm_financials_by_ticker[result["Ticker"]] = result
+            if result:
+                ttm_financials_by_ticker[result["Ticker"]] = result
 
         if i + YAHOO_INFO_MAX_WORKERS < len(tickers):
             time.sleep(1)
@@ -154,14 +159,19 @@ def compute_ttm_financials(tickers):
 def get_info(ticker):
     for attempt in range(YAHOO_INFO_RETRIES):
         try:
-            ticker_info = yahoo_ticker(ticker).get_info()
+            ticker_info = yf.Ticker(ticker).get_info()
             return build_yahoo_profile(ticker, ticker_info)
-        except (HTTPError, YFRateLimitError):
+        except YFRateLimitError:
             if attempt == YAHOO_INFO_RETRIES - 1:
-                raise
+                print(f"[ERROR] Yahoo rate limited for {ticker} after {YAHOO_INFO_RETRIES} attempts")
+                return None
+
             sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1)
-            print(f"[WARN] Yahoo request failed for {ticker}; retrying in {sleep_seconds:.1f}s")
+            print(f"[WARN] Yahoo rate limited for {ticker}; retrying in {sleep_seconds:.1f}s")
             time.sleep(sleep_seconds)
+        except Exception as e:
+            print(f"[ERROR] Failed to fetch Yahoo profile for {ticker}: {e}")
+            return None
 
 
 def get_and_parse_yahoo(tickers, cached_profiles=None):
@@ -180,7 +190,8 @@ def get_and_parse_yahoo(tickers, cached_profiles=None):
             with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_INFO_MAX_WORKERS) as executor:
                 results = list(executor.map(get_info, batch))
             for result in results:
-                profiles_by_ticker[result["Ticker"]] = result
+                if result:
+                    profiles_by_ticker[result["Ticker"]] = result
 
             if i + YAHOO_INFO_MAX_WORKERS < len(missing_tickers):
                 time.sleep(1)

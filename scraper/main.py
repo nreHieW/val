@@ -35,6 +35,7 @@ def run_dcf_scrape(tickers, client):
 
     db_name = os.getenv("MONGODB_DB_NAME")
     dcf_db = client[db_name]["dcf_inputs"]
+    num_errors = 0
     yahoo_profiles = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -46,9 +47,13 @@ def run_dcf_scrape(tickers, client):
             futures.append(future)
 
         for future in concurrent.futures.as_completed(futures):
-            yahoo_profile = future.result()
-            if yahoo_profile:
+            success, yahoo_profile = future.result()
+            if not success:
+                num_errors += 1
+            elif yahoo_profile:
                 yahoo_profiles[yahoo_profile["Ticker"]] = yahoo_profile
+
+    print(f"Number of DCF errors: {num_errors} out of {len(tickers)} tickers")
 
     macro_db = client[db_name]["macro"]
     macro_db.update_one(
@@ -74,6 +79,7 @@ def run_comps_scrape(tickers, client, cached_yahoo_profiles=None):
     finviz_df = parse_finviz(tickers)
 
     combined = pd.concat([yahoo_df, ttm_financials_df, finviz_df], axis=1, join="outer")
+    combined = combined.fillna(0)
     if "TTM Period End" in combined.columns:
         combined["TTM Period End"] = combined["TTM Period End"].replace(0, None)
     combined.reset_index(inplace=True)
@@ -97,22 +103,29 @@ def main():
 
 
 def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, db, fx_rates):
-    dcf_result = run_with_timeout(
-        get_dcf_inputs,
-        TICKER_TIMEOUT_SECONDS,
-        ticker,
-        country_erps,
-        region_mapper,
-        avg_metrics,
-        industry_mapper,
-        mature_erp,
-        risk_free_rate,
-        fx_rates,
-    )
-    dcf_inputs = json.dumps(dcf_result["dcf_inputs"], cls=CustomEncoder)
-    dcf_inputs = json.loads(dcf_inputs)
-    db.update_one({"Ticker": ticker}, {"$set": dcf_inputs}, upsert=True)
-    return dcf_result.get("yahoo_profile")
+    try:
+        dcf_result = run_with_timeout(
+            get_dcf_inputs,
+            TICKER_TIMEOUT_SECONDS,
+            ticker,
+            country_erps,
+            region_mapper,
+            avg_metrics,
+            industry_mapper,
+            mature_erp,
+            risk_free_rate,
+            fx_rates,
+        )
+        dcf_inputs = json.dumps(dcf_result["dcf_inputs"], cls=CustomEncoder)
+        dcf_inputs = json.loads(dcf_inputs)
+        db.update_one({"Ticker": ticker}, {"$set": dcf_inputs}, upsert=True)
+        return True, dcf_result.get("yahoo_profile")
+    except TimeoutError:
+        print(f"Ticker {ticker} timed out after {TICKER_TIMEOUT_SECONDS} seconds")
+        return False, None
+    except Exception as e:
+        print(f"Ticker {ticker} error: {e}")
+        return False, None
 
 
 if __name__ == "__main__":

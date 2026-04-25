@@ -43,18 +43,18 @@ def get_marketscreener_url(ticker, name: str = ""):
                     found_link = "https://www.marketscreener.com" + link
                     break
     if not found_link:
-        raise ValueError(f"Could not find {ticker} on marketscreener")
+        print(f"[INFO] Could not find {ticker} on marketscreener")
+    else:
+        with JSON_LOCK:
+            if os.path.exists("marketscreener_links.json"):
+                with open("marketscreener_links.json", "r") as f:
+                    data = json.load(f)
+                data[ticker] = found_link
+            else:
+                data = {ticker: found_link}
 
-    with JSON_LOCK:
-        if os.path.exists("marketscreener_links.json"):
-            with open("marketscreener_links.json", "r") as f:
-                data = json.load(f)
-            data[ticker] = found_link
-        else:
-            data = {ticker: found_link}
-
-        with open("marketscreener_links.json", "w") as f:
-            json.dump(data, f)
+            with open("marketscreener_links.json", "w") as f:
+                json.dump(data, f)
 
     return found_link
 
@@ -165,10 +165,15 @@ def get_marketscreener_links(tickers):
         futures = {executor.submit(get_marketscreener_url, ticker): ticker for ticker in tickers}
         for future in concurrent.futures.as_completed(futures):
             ticker = futures[future]
-            link = future.result()
-            if not link.endswith("/"):
-                link += "/"
-            links[ticker] = link + "finances/"
+            try:
+                link = future.result()
+                if not link:
+                    continue
+                if not link.endswith("/"):
+                    link += "/"
+                links[ticker] = link + "finances/"
+            except Exception:
+                continue
 
     return links
 
@@ -183,46 +188,47 @@ def parse_marketscreener(marketscreener_urls):
 
     for ticker, html in htmls.items():
         if not html:
-            raise ValueError(f"Empty MarketScreener HTML for {ticker}")
-        soup = BeautifulSoup(html, features="lxml")
-        for div in soup.find_all("div", {"class": "card card--collapsible mb-15"}):
-            header = div.find("div", {"class": "card-header"})
-            if not header:
-                continue
-            header_text = header.text.lower()
-            if "income statement" not in header_text:
-                continue
+            continue
+        try:
+            soup = BeautifulSoup(html, features="lxml")
+            for div in soup.find_all("div", {"class": "card card--collapsible mb-15"}):
+                header = div.find("div", {"class": "card-header"})
+                if not header:
+                    continue
+                header_text = header.text.lower()
+                if "income statement" not in header_text:
+                    continue
 
-            income_statement = pd.read_html(StringIO(str(div.find("table"))))[0]
-            income_statement = income_statement.dropna(axis=1, how="all")
-            first_col = income_statement.columns[0]
-            income_statement[first_col] = income_statement[first_col].astype(str).str.replace(r"\d", "", regex=True).str.strip()
-            income_statement.set_index(first_col, inplace=True)
-            income_statement.index = income_statement.index.str.strip()
-            if income_statement.index.has_duplicates:
-                income_statement = income_statement.groupby(level=0).first()
-            income_statement = income_statement.reindex(["Net sales", "Net income", "EBITDA", "EBIT"]).fillna(0)
-            indiv = income_statement.stack()
-            indiv.index = [" ".join(x) for x in indiv.index]
-            indiv = indiv.to_frame().T
+                income_statement = pd.read_html(StringIO(str(div.find("table"))))[0]
+                income_statement = income_statement.dropna(axis=1, how="all")
+                first_col = income_statement.columns[0]
+                income_statement[first_col] = income_statement[first_col].astype(str).str.replace(r"\d", "", regex=True).str.strip()
+                income_statement.set_index(first_col, inplace=True)
+                income_statement.index = income_statement.index.str.strip()
+                if income_statement.index.has_duplicates:
+                    income_statement = income_statement.groupby(level=0).first()
+                income_statement = income_statement.reindex(["Net sales", "Net income", "EBITDA", "EBIT"]).fillna(0)
+                indiv = income_statement.stack()
+                indiv.index = [" ".join(x) for x in indiv.index]
+                indiv = indiv.to_frame().T
 
-            superscript = div.find("sup")
-            if superscript and superscript.attrs.get("title"):
-                title = superscript.attrs["title"].strip().split()
-                indiv["Currency"] = title[0] if len(title) > 0 else 0
-                indiv["Unit"] = title[-1] if len(title) > 1 else 0
-            else:
-                indiv["Currency"] = 0
-                indiv["Unit"] = 0
+                superscript = div.find("sup")
+                if superscript and superscript.attrs.get("title"):
+                    title = superscript.attrs["title"].strip().split()
+                    indiv["Currency"] = title[0] if len(title) > 0 else 0
+                    indiv["Unit"] = title[-1] if len(title) > 1 else 0
+                else:
+                    indiv["Currency"] = 0
+                    indiv["Unit"] = 0
 
-            indiv["Ticker"] = ticker
-            dfs.append(indiv)
-            break
-        else:
-            raise ValueError(f"No income statement found in MarketScreener HTML for {ticker}")
+                indiv["Ticker"] = ticker
+                dfs.append(indiv)
+                break
+        except Exception as e:
+            print("[ERROR] Failed to parse Marketscreener", ticker, e)
 
     if not dfs:
         return pd.DataFrame()
 
     marketscreener = pd.concat(dfs, axis=0, join="outer", ignore_index=True)
-    return marketscreener.reset_index(drop=True).set_index("Ticker")
+    return marketscreener.reset_index(drop=True).fillna(0).set_index("Ticker")

@@ -13,16 +13,19 @@ def parse_finviz(tickers):
     dfs = []
 
     for i, html in enumerate(htmls):
-        soup = BeautifulSoup(html, "lxml")
-        table = soup.find("table", class_="snapshot-table2")
-        if table:
-            df = pd.read_html(StringIO(str(table)))[0].iloc[:, -2:].set_index(10)
-            df[11] = df[11].astype(str).str.replace("%", "")
-            perf_values = df.loc[perf_columns].astype(float).T.reset_index(drop=True)
-            indiv = pd.DataFrame(perf_values, columns=perf_columns)
-        else:
-            raise ValueError("No table found for ticker: " + tickers[i])
-        indiv["Ticker"] = tickers[i]
-        dfs.append(indiv)
+        try:
+            soup = BeautifulSoup(html, "lxml")
+            table = soup.find("table", class_="snapshot-table2")
+            if table:
+                df = pd.read_html(StringIO(str(table)))[0].iloc[:, -2:].set_index(10)
+                df[11] = df[11].astype(str).str.replace("%", "")
+                perf_values = df.loc[perf_columns].astype(float).T.reset_index(drop=True)
+                indiv = pd.DataFrame(perf_values, columns=perf_columns)
+            else:
+                raise ValueError("No table found for ticker: " + tickers[i])
+            indiv["Ticker"] = tickers[i]
+            dfs.append(indiv)
+        except Exception as e:
+            print("[ERROR] Failed to parse Finviz", tickers[i], e)
 
     return pd.concat(dfs, axis=0, ignore_index=True).set_index("Ticker")

@@ -1,20 +1,12 @@
 import datetime
-import time
 
 import numpy as np
 import pandas as pd
 import requests
+import yfinance as yf
 from bs4 import BeautifulSoup
-from requests.exceptions import HTTPError
-from yfinance.exceptions import YFRateLimitError
 
-from scrape.core.config import (
-    REQUEST_TIMEOUT_SECONDS,
-    YAHOO_INFO_RETRIES,
-    YAHOO_INFO_RETRY_SLEEP_SECONDS,
-    headers,
-)
-from scrape.core.yahoo_client import yahoo_ticker
+from scrape.core.config import REQUEST_TIMEOUT_SECONDS, headers
 from scrape.core.http_utils import get_proxy
 from scrape.sources.marketscreener import get_marketscreener_url, get_revenue_by_region, get_revenue_forecasts
 from scrape.sources.yahoo_profiles import build_yahoo_profile, normalize_quarterly_statement
@@ -27,65 +19,12 @@ from scrape.valuation.statements import (
 )
 from scrape.valuation.string_mapper import StringMapper
 
-_BALANCE_SHEET_EQUITY_KEYS = (
-    "Stockholders Equity",
-    "Common Stock Equity",
-    "Total Equity Gross Minority Interest",
-    "Total Stockholder Equity",
-)
-_BALANCE_SHEET_DEBT_KEYS = ("Total Debt",)
-_BALANCE_SHEET_CASH_KEYS = (
-    "Cash Cash Equivalents And Short Term Investments",
-    "Cash And Cash Equivalents",
-    "Cash Financial",
-)
-_BALANCE_SHEET_INVESTMENTS_KEYS = (
-    "Investments And Advances",
-    "Long Term Investments",
-    "Investments In Affiliates",
-)
-_BALANCE_SHEET_MINORITY_KEYS = (
-    "Minority Interest",
-    "Minority Interest Total",
-)
 
-
-def _balance_sheet_scalar(df: pd.DataFrame, candidates: tuple[str, ...], label: str) -> float:
-    for key in candidates:
-        if key in df.columns:
-            val = df[key].iloc[0]
-            if pd.isna(val):
-                continue
-            return float(val)
-    sample = list(df.columns)[:25]
-    raise KeyError(f"Balance sheet line item missing for {label!r}; tried {candidates}. Sample columns: {sample}")
-
-
-def _load_yahoo_dcf_fundamentals(symbol: str):
-    last_exc: Exception | None = None
-    for attempt in range(YAHOO_INFO_RETRIES):
-        try:
-            yf_ticker = yahoo_ticker(symbol)
-            quarterly_income_statement = normalize_quarterly_statement(yf_ticker.quarterly_income_stmt)
-            if quarterly_income_statement.empty:
-                raise ValueError(f"No quarterly income statement for {symbol}")
-            raw_bs = yf_ticker.quarterly_balance_sheet
-            if raw_bs is None or raw_bs.empty or len(raw_bs.columns) < 1:
-                raise ValueError(f"No quarterly balance sheet for {symbol}")
-            ncols = min(4, len(raw_bs.columns))
-            last_balance_sheet = raw_bs[raw_bs.columns[:ncols]].T.ffill().bfill()
-            info = yf_ticker.get_info()
-            if not info or not info.get("symbol"):
-                raise ValueError(f"Incomplete Yahoo quote for {symbol} (possible rate limit or auth failure).")
-            return quarterly_income_statement, last_balance_sheet, info
-        except (HTTPError, YFRateLimitError, ValueError, KeyError) as e:
-            last_exc = e
-            if attempt == YAHOO_INFO_RETRIES - 1:
-                raise
-            sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1)
-            print(f"[WARN] Yahoo fundamentals for {symbol} failed ({e!r}); retrying in {sleep_seconds:.1f}s")
-            time.sleep(sleep_seconds)
-    raise last_exc or RuntimeError("unreachable Yahoo fundamentals retry loop")
+def _balance_sheet_scalar(df: pd.DataFrame, key: str, default: float = 0) -> float:
+    """First value for a Yahoo line item. If the column exists but is all-NaN, iloc[0] is NaN — use default."""
+    series = df.get(key, pd.Series([default]))
+    val = series.iloc[0]
+    return float(default) if pd.isna(val) else float(val)
 
 
 def get_similar_stocks(ticker: str):
@@ -226,23 +165,26 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     marginal_tax_rate = 0.21
     value_of_options = 0
 
-    symbol = ticker
-    quarterly_income_statement, last_balance_sheet, info = _load_yahoo_dcf_fundamentals(symbol)
+    ticker = yf.Ticker(ticker)
+    quarterly_income_statement = normalize_quarterly_statement(ticker.quarterly_income_stmt)
     ttm_income_statement = quarterly_income_statement[quarterly_income_statement.columns[:4]].T.fillna(0)
-    yahoo_profile = build_yahoo_profile(info.get("symbol", symbol), info)
+    last_balance_sheet = ticker.quarterly_balance_sheet
+    last_balance_sheet = last_balance_sheet[last_balance_sheet.columns[:4]].T.ffill().bfill()
+    info = ticker.get_info()
+    yahoo_profile = build_yahoo_profile(info.get("symbol", ticker.ticker), info)
     name = info.get("longName")
     curr_currency = info.get("financialCurrency")
     fx_rate = 1
     if curr_currency:
-        if curr_currency not in fx_rates:
-            raise KeyError(f"No FX rate for reporting currency {curr_currency!r}")
-        fx_rate = fx_rates[curr_currency]
-        last_balance_sheet = last_balance_sheet.apply(lambda x: x * fx_rate)
-        ttm_income_statement["Operating Revenue"] = ttm_income_statement.get("Operating Revenue", 0) * fx_rate
-        ttm_income_statement["Interest Expense"] = ttm_income_statement.get("Interest Expense", 0) * fx_rate
-        ttm_income_statement["Pretax Income"] = ttm_income_statement.get("Pretax Income", 0) * fx_rate
-        ttm_income_statement["Net Income"] = ttm_income_statement.get("Net Income", 0) * fx_rate
-        ttm_income_statement["Operating Income"] = ttm_income_statement.get("Operating Income", 0) * fx_rate
+        resolved_fx_rate = fx_rates.get(curr_currency)
+        if resolved_fx_rate:
+            fx_rate = resolved_fx_rate
+            last_balance_sheet = last_balance_sheet.apply(lambda x: x * fx_rate)
+            ttm_income_statement["Operating Revenue"] = ttm_income_statement.get("Operating Revenue", 0) * fx_rate
+            ttm_income_statement["Interest Expense"] = ttm_income_statement.get("Interest Expense", 0) * fx_rate
+            ttm_income_statement["Pretax Income"] = ttm_income_statement.get("Pretax Income", 0) * fx_rate
+            ttm_income_statement["Net Income"] = ttm_income_statement.get("Net Income", 0) * fx_rate
+            ttm_income_statement["Operating Income"] = ttm_income_statement.get("Operating Income", 0) * fx_rate
 
     ttm_columns = list(quarterly_income_statement.columns[:4])
     revenue_series = get_statement_metric_series(
@@ -269,13 +211,15 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     revenues = revenue_series.sum()
     operating_income_ttm = operating_income_series.sum()
     interest_expense = interest_expense_series.sum()
-    book_value_of_equity = _balance_sheet_scalar(last_balance_sheet, _BALANCE_SHEET_EQUITY_KEYS, "equity")
-    book_value_of_debt = _balance_sheet_scalar(last_balance_sheet, _BALANCE_SHEET_DEBT_KEYS, "total debt")
-    cash_and_marketable_securities = _balance_sheet_scalar(last_balance_sheet, _BALANCE_SHEET_CASH_KEYS, "cash")
-    cross_holdings_and_other_non_operating_assets = _balance_sheet_scalar(
-        last_balance_sheet, _BALANCE_SHEET_INVESTMENTS_KEYS, "investments"
+    book_value_of_equity = _balance_sheet_scalar(last_balance_sheet, "Stockholders Equity")
+    book_value_of_debt = _balance_sheet_scalar(last_balance_sheet, "Total Debt")
+    cash_and_marketable_securities = _balance_sheet_scalar(
+        last_balance_sheet, "Cash Cash Equivalents And Short Term Investments"
     )
-    minority_interest = _balance_sheet_scalar(last_balance_sheet, _BALANCE_SHEET_MINORITY_KEYS, "minority interest")  # by right. should convert to market value
+    cross_holdings_and_other_non_operating_assets = _balance_sheet_scalar(
+        last_balance_sheet, "Investments And Advances"
+    )
+    minority_interest = _balance_sheet_scalar(last_balance_sheet, "Minority Interest")  # by right. should convert to market value
     number_of_shares_outstanding = info.get("sharesOutstanding", 0)
     curr_price = info.get("previousClose", 0)
     pretax_income_total = pretax_income_series.sum()

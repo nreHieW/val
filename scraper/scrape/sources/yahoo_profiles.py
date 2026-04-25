@@ -2,10 +2,11 @@ import concurrent.futures
 import time
 
 import pandas as pd
-import yfinance as yf
+from requests.exceptions import HTTPError
 from yfinance.exceptions import YFRateLimitError
 
 from scrape.core.config import YAHOO_INFO_MAX_WORKERS, YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS
+from scrape.core.yahoo_client import yahoo_ticker
 
 
 def build_yahoo_profile(ticker, ticker_info):
@@ -72,7 +73,7 @@ def compute_ebitda(statement: pd.DataFrame, start=0, count=4):
 def get_ttm_financials(ticker):
     for attempt in range(YAHOO_INFO_RETRIES):
         try:
-            yf_ticker = yf.Ticker(ticker)
+            yf_ticker = yahoo_ticker(ticker)
             quarterly_income_stmt = normalize_quarterly_statement(yf_ticker.quarterly_income_stmt)
             if quarterly_income_stmt.empty:
                 raise ValueError(f"No quarterly income statement for {ticker}")
@@ -123,11 +124,11 @@ def get_ttm_financials(ticker):
                 "TTM Period End": pd.Timestamp(most_recent_quarter).strftime("%Y-%m-%d"),
             }
             return result
-        except YFRateLimitError:
+        except (HTTPError, YFRateLimitError):
             if attempt == YAHOO_INFO_RETRIES - 1:
                 raise
             sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1)
-            print(f"[WARN] Yahoo rate limited for {ticker} TTM; retrying in {sleep_seconds:.1f}s")
+            print(f"[WARN] Yahoo request failed for {ticker} TTM; retrying in {sleep_seconds:.1f}s")
             time.sleep(sleep_seconds)
 
 
@@ -153,13 +154,13 @@ def compute_ttm_financials(tickers):
 def get_info(ticker):
     for attempt in range(YAHOO_INFO_RETRIES):
         try:
-            ticker_info = yf.Ticker(ticker).get_info()
+            ticker_info = yahoo_ticker(ticker).get_info()
             return build_yahoo_profile(ticker, ticker_info)
-        except YFRateLimitError:
+        except (HTTPError, YFRateLimitError):
             if attempt == YAHOO_INFO_RETRIES - 1:
                 raise
             sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1)
-            print(f"[WARN] Yahoo rate limited for {ticker}; retrying in {sleep_seconds:.1f}s")
+            print(f"[WARN] Yahoo request failed for {ticker}; retrying in {sleep_seconds:.1f}s")
             time.sleep(sleep_seconds)
 
 

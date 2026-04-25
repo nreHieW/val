@@ -1,15 +1,15 @@
 import pandas as pd
 import requests
-import yfinance as yf
 
 from scrape.core.config import CURRENCIES, REQUEST_TIMEOUT_SECONDS, headers
+from scrape.core.yahoo_client import yahoo_ticker
 from scrape.valuation.string_mapper import StringMapper
 
 
 def get_exchange_rates():
     fx_rate = {}
     for currency in CURRENCIES:
-        fx_rate[currency] = yf.Ticker(currency + "USD=X").history().Close.iloc[-1].item()
+        fx_rate[currency] = yahoo_ticker(currency + "USD=X").history().Close.iloc[-1].item()
     return fx_rate
 
 

@@ -25,23 +25,9 @@ def _parse_finviz_html(html: str, ticker: str) -> pd.DataFrame:
 
 def parse_finviz(tickers):
     finviz_urls = ["https://finviz.com/quote.ashx?t=" + t for t in tickers]
-    url_by_ticker = dict(zip(tickers, finviz_urls))
     htmls = get_htmls(finviz_urls)
     dfs = []
 
     for i, ticker in enumerate(tickers):
-        url = url_by_ticker[ticker]
-        last_exc: Exception | None = None
-        for attempt in range(FINVIZ_RETRIES):
-            html = htmls[i] if attempt == 0 else fetch_html(url)
-            try:
-                dfs.append(_parse_finviz_html(html, ticker))
-                break
-            except Exception as e:
-                last_exc = e
-                if attempt < FINVIZ_RETRIES - 1:
-                    time.sleep(FINVIZ_RETRY_SLEEP_SECONDS * (attempt + 1))
-                else:
-                    print(f"[ERROR] Failed to parse Finviz {ticker} after {FINVIZ_RETRIES} attempts: {last_exc!r}")
-
+        dfs.append(_parse_finviz_html(htmls[i], ticker))
     return pd.concat(dfs, axis=0, ignore_index=True).set_index("Ticker")

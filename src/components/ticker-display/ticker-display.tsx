@@ -1,6 +1,6 @@
 import TopCard from "./top-card";
 import StackedBarChart from "../stacked-bar-chart";
-import { getDCFInputs, getDCFOutput } from "../../lib/apiHelpers";
+import { getDCFInputs, getDCFOutput, getTickerOverview } from "../../lib/apiHelpers";
 import {
   constructModellingData,
   createIncomeStatementData,
@@ -12,6 +12,7 @@ import CardItem from "./card-item";
 import InputForm from "./input-form";
 import { DCFInputData, UserDCFInputs } from "./types";
 import InfoHover from "../info-hover";
+import OverviewTab from "./overview-tab";
 import TickerDisplayTabs from "./ticker-display-tabs";
 
 export default async function TickerDisplay({
@@ -21,7 +22,10 @@ export default async function TickerDisplay({
   ticker: string;
   userInputs: string;
 }) {
-  const dcfData = await getDCFInputs(ticker);
+  const [dcfData, overview] = await Promise.all([
+    getDCFInputs(ticker),
+    getTickerOverview(ticker),
+  ]);
   let dcfInputs: DCFInputData = constructModellingData(dcfData);
   if (userInputs.length != 0) {
     let decoded: UserDCFInputs = decodeInputs(userInputs);
@@ -36,7 +40,10 @@ export default async function TickerDisplay({
   const incomeStatementData = createIncomeStatementData(df);
   const revenues = df.map((item: any) => formatAmount(item.revenues));
   return (
-    <TickerDisplayTabs ticker={ticker}>
+    <TickerDisplayTabs
+      ticker={ticker}
+      overview={<OverviewTab overview={overview} />}
+    >
       <div className="space-y-0">
         <TopCard
           ticker={ticker}

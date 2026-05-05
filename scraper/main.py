@@ -35,8 +35,10 @@ def run_dcf_scrape(tickers, client):
 
     db_name = os.getenv("MONGODB_DB_NAME")
     dcf_db = client[db_name]["dcf_inputs"]
+    overview_db = client[db_name]["ticker_overviews"]
     num_errors = 0
     yahoo_profiles = {}
+    yahoo_overviews = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = []
@@ -47,11 +49,14 @@ def run_dcf_scrape(tickers, client):
             futures.append(future)
 
         for future in concurrent.futures.as_completed(futures):
-            success, yahoo_profile = future.result()
+            success, yahoo_profile, yahoo_overview = future.result()
             if not success:
                 num_errors += 1
-            elif yahoo_profile:
+                continue
+            if yahoo_profile:
                 yahoo_profiles[yahoo_profile["Ticker"]] = yahoo_profile
+            if yahoo_overview:
+                yahoo_overviews[yahoo_overview["Ticker"]] = yahoo_overview
 
     print(f"Number of DCF errors: {num_errors} out of {len(tickers)} tickers")
 
@@ -70,6 +75,11 @@ def run_dcf_scrape(tickers, client):
         },
         upsert=True,
     )
+    overview_records = json.loads(json.dumps(list(yahoo_overviews.values()), cls=CustomEncoder))
+    for record in overview_records:
+        overview_db.update_one({"Ticker": record["Ticker"]}, {"$set": record}, upsert=True)
+    print(f"Number of Yahoo overviews: {len(overview_records)} out of {len(tickers)} tickers")
+
     return yahoo_profiles
 
 
@@ -119,13 +129,13 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
         dcf_inputs = json.dumps(dcf_result["dcf_inputs"], cls=CustomEncoder)
         dcf_inputs = json.loads(dcf_inputs)
         db.update_one({"Ticker": ticker}, {"$set": dcf_inputs}, upsert=True)
-        return True, dcf_result.get("yahoo_profile")
+        return True, dcf_result.get("yahoo_profile"), dcf_result.get("yahoo_overview")
     except TimeoutError:
         print(f"Ticker {ticker} timed out after {TICKER_TIMEOUT_SECONDS} seconds")
-        return False, None
+        return False, None, None
     except Exception as e:
         print(f"Ticker {ticker} error: {e}")
-        return False, None
+        return False, None, None
 
 
 if __name__ == "__main__":

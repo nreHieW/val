@@ -66,3 +66,72 @@ export type DCFInputData = {
   r_and_d_expenses: number[];
   discount_rate: number;
 };
+
+export type TickerOverview = {
+  Ticker: string;
+  profile?: {
+    name?: string | null;
+    shortName?: string | null;
+    sector?: string | null;
+    industry?: string | null;
+    country?: string | null;
+    website?: string | null;
+    summary?: string | null;
+  };
+  market?: {
+    price?: number | null;
+    dayChangePercent?: number | null;
+    marketCap?: number | null;
+    enterpriseValue?: number | null;
+    beta?: number | null;
+    fiftyTwoWeekHigh?: number | null;
+    fiftyTwoWeekLow?: number | null;
+  };
+  valuation?: {
+    trailingPe?: number | null;
+    forwardPe?: number | null;
+    priceToSales?: number | null;
+    enterpriseToRevenue?: number | null;
+    enterpriseToEbitda?: number | null;
+    operatingMargins?: number | null;
+  };
+  analyst?: {
+    targets?: {
+      low?: number | null;
+      high?: number | null;
+      mean?: number | null;
+      median?: number | null;
+    };
+    targetUpside?: number | null;
+    recommendations?: {
+      current?: RecommendationMix | null;
+    };
+  };
+  eps?: {
+    estimates?: {
+      currentYear?: EpsEstimate | null;
+      nextYear?: EpsEstimate | null;
+      currentQuarter?: EpsEstimate | null;
+    };
+  };
+  ownership?: {
+    insidersPercentHeld?: number | null;
+    institutionsPercentHeld?: number | null;
+    institutionsCount?: number | null;
+    insiderRoster?: unknown[];
+  };
+};
+
+export type RecommendationMix = {
+  period?: string;
+  strongBuy?: number | null;
+  buy?: number | null;
+  hold?: number | null;
+  sell?: number | null;
+  strongSell?: number | null;
+};
+
+export type EpsEstimate = {
+  avg?: number | null;
+  growth?: number | null;
+};

@@ -1,18 +1,16 @@
-import time
 from io import StringIO
 
 import pandas as pd
 from bs4 import BeautifulSoup
 
-from scrape.core.config import FINVIZ_RETRIES, FINVIZ_RETRY_SLEEP_SECONDS
-from scrape.core.http_utils import fetch_html, get_htmls
+from scrape.core.http_utils import get_htmls
 
 _PERF_COLUMNS = ["Perf Week", "Perf Month", "Perf Quarter", "Perf Half Y", "Perf Year", "Perf YTD"]
 
 
 def parse_finviz(tickers):
     finviz_urls = ["https://finviz.com/quote.ashx?t=" + t for t in tickers]
-    htmls = get_htmls(finviz_urls)
+    htmls = get_htmls(finviz_urls, max_workers=10)
     dfs = []
 
     for i, ticker in enumerate(tickers):

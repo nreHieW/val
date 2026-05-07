@@ -133,7 +133,7 @@ def get_ttm_financials(ticker):
                 return None
 
             sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1)
-            print(f"[WARN] Yahoo rate limited for {ticker} TTM; retrying in {sleep_seconds:.1f}s")
+            # print(f"[WARN] Yahoo rate limited for {ticker} TTM; retrying in {sleep_seconds:.1f}s")
             time.sleep(sleep_seconds)
         except Exception as e:
             print(f"[ERROR] Failed to fetch TTM financials for {ticker}: {e}")
@@ -171,7 +171,7 @@ def get_info(ticker):
                 return None
 
             sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1)
-            print(f"[WARN] Yahoo rate limited for {ticker}; retrying in {sleep_seconds:.1f}s")
+            # print(f"[WARN] Yahoo rate limited for {ticker}; retrying in {sleep_seconds:.1f}s")
             time.sleep(sleep_seconds)
         except Exception as e:
             print(f"[ERROR] Failed to fetch Yahoo profile for {ticker}: {e}")

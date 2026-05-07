@@ -105,11 +105,13 @@ def run_comps_scrape(tickers, client, cached_yahoo_profiles=None):
 
 def main():
     tickers = get_all_tickers()
-    print("Number of tickers:", len(tickers))
-    client = get_mongo_client()
-    yahoo_profiles = run_dcf_scrape(tickers, client)
-    print("Running comps scrape")
-    run_comps_scrape(tickers, client, cached_yahoo_profiles=yahoo_profiles)
+    out = parse_finviz(tickers)
+    print(out)
+    # print("Number of tickers:", len(tickers))
+    # client = get_mongo_client()
+    # yahoo_profiles = run_dcf_scrape(tickers, client)
+    # print("Running comps scrape")
+    # run_comps_scrape(tickers, client, cached_yahoo_profiles=yahoo_profiles)
 
 
 def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, db, fx_rates):

@@ -10,7 +10,7 @@ _PERF_COLUMNS = ["Perf Week", "Perf Month", "Perf Quarter", "Perf Half Y", "Perf
 
 def parse_finviz(tickers):
     finviz_urls = ["https://finviz.com/quote.ashx?t=" + t for t in tickers]
-    htmls = get_htmls(finviz_urls, workers=10)
+    htmls = get_htmls(finviz_urls, workers=2)
     dfs = []
 
     for i, ticker in enumerate(tickers):

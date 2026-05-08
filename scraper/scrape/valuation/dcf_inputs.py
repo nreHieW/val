@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from scrape.core.config import REQUEST_TIMEOUT_SECONDS, headers
 from scrape.core.http_utils import get_proxy
 from scrape.sources.marketscreener import get_marketscreener_url, get_revenue_by_region, get_revenue_forecasts
+from scrape.sources.yahoo_overview import build_yahoo_overview
 from scrape.sources.yahoo_profiles import build_yahoo_profile, normalize_quarterly_statement
 from scrape.valuation.market_metrics import get_industry_beta, get_regional_crps, synthetic_rating
 from scrape.valuation.statements import (
@@ -172,6 +173,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     last_balance_sheet = last_balance_sheet[last_balance_sheet.columns[:4]].T.ffill().bfill()
     info = ticker.get_info()
     yahoo_profile = build_yahoo_profile(info.get("symbol", ticker.ticker), info)
+    yahoo_overview = build_yahoo_overview(ticker, info)
     name = info.get("longName")
     curr_currency = info.get("financialCurrency")
     fx_rate = 1
@@ -380,4 +382,5 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
             },
         },
         "yahoo_profile": yahoo_profile,
+        "yahoo_overview": yahoo_overview,
     }

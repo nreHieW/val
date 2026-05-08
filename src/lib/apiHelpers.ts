@@ -1,4 +1,4 @@
-import { DCFInputData } from "../components/ticker-display/types";
+import { DCFInputData, TickerOverview } from "../components/ticker-display/types";
 
 const baseURL = process.env.URL;
 export async function getDCFInputs(query: string) {
@@ -17,6 +17,16 @@ export async function getPriceHistory(query: string) {
 
   return Array.isArray(data.history) ? data.history : [];
 }
+export async function getTickerOverview(query: string): Promise<TickerOverview | null> {
+  const response = await fetch(
+    `${baseURL}/api/ticker/overview?ticker=${encodeURIComponent(query)}`,
+    { next: { revalidate: 60 } },
+  );
+  if (!response.ok) {
+    return null;
+  }
+  return response.json();
+}
 export async function getDCFOutput(inputData: DCFInputData) {
   if (!inputData) return;
 
@@ -33,4 +43,3 @@ export async function getDCFOutput(inputData: DCFInputData) {
   const data = await response.json();
   return data;
 }
-

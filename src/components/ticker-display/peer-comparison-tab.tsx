@@ -55,8 +55,10 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
   const [peers, setPeers] = useState<string[]>(() =>
     parsePeers(searchParams.get("peers"), normalizedMainTicker),
   );
-  const [rows, setRows] = useState<FinancialComparisonRow[]>([]);
-  const [isLoadingRows, setIsLoadingRows] = useState(false);
+  const [rowsState, setRowsState] = useState<{
+    key: string;
+    rows: FinancialComparisonRow[];
+  }>({ key: "", rows: [] });
   const [visibleMetrics, setVisibleMetrics] = useState<MetricKey[]>(() =>
     parseVisibleMetrics(searchParams.get("metrics")),
   );
@@ -120,9 +122,9 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
 
   useEffect(() => {
     const tickers = [normalizedMainTicker, ...peers];
+    const key = tickers.join(",");
     const controller = new AbortController();
-    setIsLoadingRows(true);
-    fetch(`/api/financials?tickers=${encodeURIComponent(tickers.join(","))}`, {
+    fetch(`/api/financials?tickers=${encodeURIComponent(key)}`, {
       signal: controller.signal,
       cache: "no-store",
     })
@@ -139,16 +141,11 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
         const ordered = tickers
           .map((itemTicker) => byTicker.get(itemTicker))
           .filter((item): item is FinancialComparisonRow => Boolean(item));
-        setRows(ordered);
+        setRowsState({ key, rows: ordered });
       })
       .catch((error) => {
         if ((error as DOMException).name !== "AbortError") {
-          setRows([]);
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
-          setIsLoadingRows(false);
+          setRowsState({ key, rows: [] });
         }
       });
 
@@ -195,6 +192,9 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
     searchQuery.length > 0 &&
     debouncedSearchQuery.length > 0 &&
     normalizedResults.length === 0;
+  const rowsKey = [normalizedMainTicker, ...peers].join(",");
+  const rows = rowsState.key === rowsKey ? rowsState.rows : [];
+  const isLoadingRows = rowsState.key !== rowsKey;
 
   return (
     <div className="space-y-6 pt-2">

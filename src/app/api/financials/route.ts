@@ -12,6 +12,7 @@ type FinancialRow = {
   netIncome: number | null;
   ebitda: number | null;
   ebit: number | null;
+  priceToFcf: number | null;
   pe: number | null;
   forwardPe: number | null;
   priceToSales: number | null;
@@ -75,6 +76,7 @@ function mapToComparisonRow(doc: Record<string, unknown>): FinancialRow {
   const netIncomeSeries = getTtmSeries(doc, "Net Income TTM", "Net Income Prev TTM");
   const ebitdaSeries = getTtmSeries(doc, "EBITDA TTM", "EBITDA Prev TTM");
   const ebitSeries = getTtmSeries(doc, "EBIT TTM", "EBIT Prev TTM");
+  const freeCashFlow = toFiniteNumber(doc["Free Cash Flow TTM"]);
 
   const price = toFiniteNumber(doc.Price);
   const weekHigh = toFiniteNumber(doc["52-Week High"]);
@@ -109,6 +111,7 @@ function mapToComparisonRow(doc: Record<string, unknown>): FinancialRow {
     netIncome: netIncomeSeries.latest,
     ebitda: ebitdaSeries.latest,
     ebit: ebitSeries.latest,
+    priceToFcf: ratio(marketCap, freeCashFlow),
     pe,
     forwardPe,
     priceToSales,

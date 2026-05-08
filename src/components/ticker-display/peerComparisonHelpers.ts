@@ -4,6 +4,7 @@ export type MetricKey =
   | "netIncome"
   | "ebitda"
   | "ebit"
+  | "priceToFcf"
   | "pe"
   | "forwardPe"
   | "priceToSales"
@@ -24,6 +25,7 @@ export type FinancialComparisonRow = {
   netIncome: number | null;
   ebitda: number | null;
   ebit: number | null;
+  priceToFcf: number | null;
   pe: number | null;
   forwardPe: number | null;
   priceToSales: number | null;
@@ -50,6 +52,7 @@ export const METRICS: Array<{ key: MetricKey; label: string; higherIsBetter: boo
   { key: "pe", label: "P/E", higherIsBetter: false },
   { key: "forwardPe", label: "Forward P/E", higherIsBetter: false },
   { key: "priceToSales", label: "Price/Sales", higherIsBetter: false },
+  { key: "priceToFcf", label: "Price/FCF", higherIsBetter: false },
   { key: "evToEbitda", label: "EV/EBITDA", higherIsBetter: false },
   { key: "evToSales", label: "EV/Sales", higherIsBetter: false },
 ];
@@ -107,6 +110,7 @@ export function getCellBgColor(
     key === "pe" ||
     key === "forwardPe" ||
     key === "priceToSales" ||
+    key === "priceToFcf" ||
     key === "evToEbitda" ||
     key === "evToSales";
   const better = isValuationMultiple && !higherIsBetter

@@ -52,6 +52,8 @@ def sum_statement_metric(statement: pd.DataFrame, metric_names: list[str], start
 
 def compute_ebitda(statement: pd.DataFrame, start=0, count=4):
     ebitda = sum_statement_metric(statement, ["EBITDA"], start=start, count=count)
+    if ebitda is not None:
+        return ebitda
 
     ebit = sum_statement_metric(statement, ["EBIT", "Operating Income"], start=start, count=count)
     depreciation = sum_statement_metric(
@@ -74,6 +76,7 @@ def get_ttm_financials(ticker):
         try:
             yf_ticker = yf.Ticker(ticker)
             quarterly_income_stmt = normalize_quarterly_statement(yf_ticker.quarterly_income_stmt)
+            quarterly_cashflow = normalize_quarterly_statement(yf_ticker.quarterly_cashflow)
             if quarterly_income_stmt.empty:
                 return None
 
@@ -120,6 +123,7 @@ def get_ttm_financials(ticker):
                     start=4,
                     count=4,
                 ),
+                "Free Cash Flow TTM": sum_statement_metric(quarterly_cashflow, ["Free Cash Flow"]),
                 "TTM Period End": pd.Timestamp(most_recent_quarter).strftime("%Y-%m-%d"),
             }
             return result
@@ -129,7 +133,7 @@ def get_ttm_financials(ticker):
                 return None
 
             sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1)
-            print(f"[WARN] Yahoo rate limited for {ticker} TTM; retrying in {sleep_seconds:.1f}s")
+            # print(f"[WARN] Yahoo rate limited for {ticker} TTM; retrying in {sleep_seconds:.1f}s")
             time.sleep(sleep_seconds)
         except Exception as e:
             print(f"[ERROR] Failed to fetch TTM financials for {ticker}: {e}")
@@ -167,7 +171,7 @@ def get_info(ticker):
                 return None
 
             sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1)
-            print(f"[WARN] Yahoo rate limited for {ticker}; retrying in {sleep_seconds:.1f}s")
+            # print(f"[WARN] Yahoo rate limited for {ticker}; retrying in {sleep_seconds:.1f}s")
             time.sleep(sleep_seconds)
         except Exception as e:
             print(f"[ERROR] Failed to fetch Yahoo profile for {ticker}: {e}")

@@ -5,6 +5,7 @@ import os
 import time
 
 import pandas as pd
+from yfinance.exceptions import YFRateLimitError
 
 from scrape.core.config import MAX_WORKERS, TICKER_TIMEOUT_SECONDS
 from scrape.core.http_utils import run_with_timeout
@@ -41,29 +42,49 @@ def run_dcf_scrape(tickers, client):
     db_name = os.getenv("MONGODB_DB_NAME")
     dcf_db = client[db_name]["dcf_inputs"]
     overview_db = client[db_name]["ticker_overviews"]
-    num_errors = 0
+    failure_counts = {}
     yahoo_profiles = {}
     yahoo_overviews = {}
 
+    consecutive_rate_limited_batches = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = []
-        for i, ticker in enumerate(tickers):
-            if i > 0 and i % MAX_WORKERS == 0:
+        for i in range(0, len(tickers), MAX_WORKERS):
+            batch = tickers[i : i + MAX_WORKERS]
+            futures = [
+                executor.submit(process_ticker, ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, dcf_db, fx_rates)
+                for ticker in batch
+            ]
+            batch_failure_counts = {}
+
+            for future in concurrent.futures.as_completed(futures):
+                success, yahoo_profile, yahoo_overview, failure_reason = future.result()
+                if not success:
+                    failure_counts[failure_reason] = failure_counts.get(failure_reason, 0) + 1
+                    batch_failure_counts[failure_reason] = batch_failure_counts.get(failure_reason, 0) + 1
+                    continue
+                if yahoo_profile:
+                    yahoo_profiles[yahoo_profile["Ticker"]] = yahoo_profile
+                if yahoo_overview:
+                    yahoo_overviews[yahoo_overview["Ticker"]] = yahoo_overview
+
+            if batch_failure_counts.get("yahoo_rate_limit") == len(batch):
+                consecutive_rate_limited_batches += 1
+                if consecutive_rate_limited_batches >= 3:
+                    remaining = len(tickers) - i - len(batch)
+                    if remaining > 0:
+                        failure_counts["skipped_after_rate_limit"] = remaining
+                    logger.warning("Stopping DCF scrape early after repeated Yahoo rate-limited batches")
+                    break
+            else:
+                consecutive_rate_limited_batches = 0
+
+            if i + MAX_WORKERS < len(tickers):
                 time.sleep(1)
-            future = executor.submit(process_ticker, ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, dcf_db, fx_rates)
-            futures.append(future)
 
-        for future in concurrent.futures.as_completed(futures):
-            success, yahoo_profile, yahoo_overview = future.result()
-            if not success:
-                num_errors += 1
-                continue
-            if yahoo_profile:
-                yahoo_profiles[yahoo_profile["Ticker"]] = yahoo_profile
-            if yahoo_overview:
-                yahoo_overviews[yahoo_overview["Ticker"]] = yahoo_overview
-
+    num_errors = sum(failure_counts.values())
     logger.info("DCF scrape completed: %s errors out of %s tickers", num_errors, len(tickers))
+    if failure_counts:
+        logger.warning("DCF failure summary: %s", ", ".join(f"{reason}: {count}" for reason, count in sorted(failure_counts.items())))
 
     macro_db = client[db_name]["macro"]
     macro_db.update_one(
@@ -134,13 +155,13 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
         dcf_inputs = json.dumps(dcf_result["dcf_inputs"], cls=CustomEncoder)
         dcf_inputs = json.loads(dcf_inputs)
         db.update_one({"Ticker": ticker}, {"$set": dcf_inputs}, upsert=True)
-        return True, dcf_result.get("yahoo_profile"), dcf_result.get("yahoo_overview")
+        return True, dcf_result.get("yahoo_profile"), dcf_result.get("yahoo_overview"), None
     except TimeoutError:
-        logger.debug("%s timed out after %s seconds", ticker, TICKER_TIMEOUT_SECONDS)
-        return False, None, None
+        return False, None, None, "timeout"
+    except YFRateLimitError:
+        return False, None, None, "yahoo_rate_limit"
     except Exception as e:
-        logger.debug("%s failed: %s", ticker, e)
-        return False, None, None
+        return False, None, None, type(e).__name__
 
 
 if __name__ == "__main__":

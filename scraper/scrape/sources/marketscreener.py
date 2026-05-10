@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 
 
 def get_marketscreener_url(ticker, name: str = ""):
+    with JSON_LOCK:
+        if os.path.exists("marketscreener_links.json"):
+            with open("marketscreener_links.json", "r") as f:
+                cached_link = json.load(f).get(ticker)
+            if cached_link:
+                return cached_link
+
     search_url = "https://www.marketscreener.com/search/?q=" + "+".join(ticker.split())
     page = requests.get(search_url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
     soup = BeautifulSoup(page.content, "lxml")

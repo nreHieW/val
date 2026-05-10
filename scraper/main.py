@@ -5,8 +5,6 @@ import os
 import traceback
 import time
 
-os.environ["TQDM_DISABLE"] = "1"
-
 import pandas as pd
 import yfinance as yf
 from yfinance.exceptions import YFRateLimitError

@@ -1,3 +1,4 @@
+import concurrent.futures
 import datetime
 import logging
 import time
@@ -255,11 +256,21 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     unlevered_beta, industry = get_industry_beta(industry, sector, industry_mapper, avg_betas)
     marketscreener_url = get_marketscreener_url(symbol, info.get("shortName") or info.get("longName") or "")
 
-    try:
-        regional_revenues = get_revenue_by_region(symbol, marketscreener_url)
-    except Exception as e:
-        logger.debug("%s regional revenue unavailable; using country fallback: %s", symbol, e)
-        regional_revenues = {country or "Global": revenues if revenues else 1}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        regional_revenues_future = executor.submit(get_revenue_by_region, symbol, marketscreener_url)
+        forecast_defaults_future = executor.submit(get_revenue_forecasts, marketscreener_url)
+
+        try:
+            regional_revenues = regional_revenues_future.result()
+        except Exception as e:
+            logger.debug("%s regional revenue unavailable; using country fallback: %s", symbol, e)
+            regional_revenues = {country or "Global": revenues if revenues else 1}
+        try:
+            forecast_defaults = forecast_defaults_future.result()
+        except Exception as e:
+            logger.debug("%s revenue forecasts unavailable; using defaults: %s", symbol, e)
+            forecast_defaults = {}
+
     equity_risk_premium, mapped_regional_revenues = get_regional_crps(regional_revenues, region_mapper, country_erps)
     equity_risk_premium = equity_risk_premium + mature_erp
     _, company_spread, prob_of_failure = synthetic_rating(info.get("marketCap", 0), operating_income_ttm, interest_expense)
@@ -268,12 +279,6 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     target_pre_tax_operating_margin = avg_metrics["Pre-tax Operating Margin (Unadjusted)"].get(industry, 0)
 
     operating_margin_this_year = info.get("operatingMargins", operating_income_ttm / revenues if revenues else 0)
-
-    try:
-        forecast_defaults = get_revenue_forecasts(marketscreener_url)
-    except Exception as e:
-        logger.debug("%s revenue forecasts unavailable; using defaults: %s", symbol, e)
-        forecast_defaults = {}
     consensus_revenues_usd = {
         year: value * fx_rate
         for year, value in forecast_defaults.get("consensus_revenues", {}).items()
@@ -353,12 +358,15 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     curr_sales_to_capital_ratio = revenues / invested_capital if invested_capital else avg_metrics["Sales/Capital"].get(industry, 1)
     sales_to_capital_ratio_early = curr_sales_to_capital_ratio
     sales_to_capital_ratio_steady = avg_metrics["Sales/Capital"].get(industry, 1)
-    try:
-        r_and_d_expenses = r_and_d_handler(symbol, industry)
-    except Exception as e:
-        logger.debug("%s R&D expense unavailable; using empty history: %s", symbol, e)
-        r_and_d_expenses = []
-    similar_stocks = get_similar_stocks(symbol)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        r_and_d_future = executor.submit(r_and_d_handler, symbol, industry)
+        similar_stocks_future = executor.submit(get_similar_stocks, symbol)
+        try:
+            r_and_d_expenses = r_and_d_future.result()
+        except Exception as e:
+            logger.debug("%s R&D expense unavailable; using empty history: %s", symbol, e)
+            r_and_d_expenses = []
+        similar_stocks = similar_stocks_future.result()
     return {
         "dcf_inputs": {
             "name": name,

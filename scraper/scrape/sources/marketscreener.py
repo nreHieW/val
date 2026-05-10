@@ -63,6 +63,8 @@ def get_marketscreener_url(ticker, name: str = ""):
 
 
 def get_revenue_by_region(ticker, url):
+    if not url:
+        raise ValueError(f"No MarketScreener URL for {ticker}")
     page = requests.get(url + "company/", headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
     soup = BeautifulSoup(page.content, "lxml")
     df = None

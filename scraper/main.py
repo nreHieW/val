@@ -2,7 +2,29 @@ import concurrent.futures
 import json
 import logging
 import os
+import sys
 import time
+
+os.environ["TQDM_DISABLE"] = "1"
+
+
+class _ProgressFilter:
+    def __init__(self, stream):
+        self.stream = stream
+
+    def write(self, text):
+        if "Batches:" not in text:
+            return self.stream.write(text)
+        return len(text)
+
+    def flush(self):
+        return self.stream.flush()
+
+    def isatty(self):
+        return False
+
+
+sys.stderr = _ProgressFilter(sys.stderr)
 
 import pandas as pd
 from yfinance.exceptions import YFRateLimitError

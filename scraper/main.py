@@ -53,6 +53,7 @@ def run_dcf_scrape(tickers, client):
     consecutive_rate_limited_batches = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         for i in range(0, len(tickers), MAX_WORKERS):
+            print(f"Processing batch {i // MAX_WORKERS + 1} of {len(tickers) // MAX_WORKERS + 1}")
             batch = tickers[i : i + MAX_WORKERS]
             futures = [
                 executor.submit(process_ticker, ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, dcf_db, fx_rates)

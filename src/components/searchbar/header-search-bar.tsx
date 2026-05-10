@@ -66,8 +66,8 @@ function BaseSearchBar() {
 
   useEffect(() => {
     const handler = setTimeout(() => {
-      setDebouncedSearchQuery(searchQuery);
-    }, 200);
+      setDebouncedSearchQuery(searchQuery.trim());
+    }, 150);
 
     return () => {
       clearTimeout(handler);

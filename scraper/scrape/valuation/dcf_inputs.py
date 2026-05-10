@@ -11,7 +11,6 @@ from bs4 import BeautifulSoup
 from yfinance.exceptions import YFRateLimitError
 
 from scrape.core.config import REQUEST_TIMEOUT_SECONDS, YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS, headers
-from scrape.core.http_utils import get_proxy
 from scrape.sources.marketscreener import get_marketscreener_url, get_revenue_by_region, get_revenue_forecasts
 from scrape.sources.yahoo_overview import build_yahoo_overview
 from scrape.sources.yahoo_profiles import build_yahoo_profile, normalize_quarterly_statement
@@ -39,7 +38,6 @@ def get_similar_stocks(ticker: str):
     response = requests.get(
         url,
         headers=headers,
-        proxies=get_proxy(),
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
 
@@ -358,15 +356,16 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     curr_sales_to_capital_ratio = revenues / invested_capital if invested_capital else avg_metrics["Sales/Capital"].get(industry, 1)
     sales_to_capital_ratio_early = curr_sales_to_capital_ratio
     sales_to_capital_ratio_steady = avg_metrics["Sales/Capital"].get(industry, 1)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        r_and_d_future = executor.submit(r_and_d_handler, symbol, industry)
-        similar_stocks_future = executor.submit(get_similar_stocks, symbol)
-        try:
-            r_and_d_expenses = r_and_d_future.result()
-        except Exception as e:
-            logger.debug("%s R&D expense unavailable; using empty history: %s", symbol, e)
-            r_and_d_expenses = []
-        similar_stocks = similar_stocks_future.result()
+    try:
+        r_and_d_expenses = r_and_d_handler(symbol, industry)
+    except Exception as e:
+        logger.debug("%s R&D expense unavailable; using empty history: %s", symbol, e)
+        r_and_d_expenses = []
+    try:
+        similar_stocks = get_similar_stocks(symbol)
+    except Exception as e:
+        logger.debug("%s similar stocks unavailable; using empty list: %s", symbol, e)
+        similar_stocks = []
     return {
         "dcf_inputs": {
             "name": name,

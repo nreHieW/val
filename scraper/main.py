@@ -2,7 +2,6 @@ import concurrent.futures
 import json
 import logging
 import os
-import traceback
 import time
 
 import pandas as pd
@@ -47,7 +46,6 @@ def run_dcf_scrape(tickers, client):
     dcf_db = client[db_name]["dcf_inputs"]
     overview_db = client[db_name]["ticker_overviews"]
     failure_counts = {}
-    failure_traces = {}
     yahoo_profiles = {}
     yahoo_overviews = {}
 
@@ -63,7 +61,7 @@ def run_dcf_scrape(tickers, client):
             batch_failure_counts = {}
 
             for future in concurrent.futures.as_completed(futures):
-                success, yahoo_profile, yahoo_overview, failure_reason, failure_trace = future.result()
+                success, yahoo_profile, yahoo_overview, failure_reason = future.result()
                 if yahoo_profile:
                     yahoo_profiles[yahoo_profile["Ticker"]] = yahoo_profile
                 if yahoo_overview:
@@ -71,7 +69,6 @@ def run_dcf_scrape(tickers, client):
                 if not success:
                     failure_counts[failure_reason] = failure_counts.get(failure_reason, 0) + 1
                     batch_failure_counts[failure_reason] = batch_failure_counts.get(failure_reason, 0) + 1
-                    failure_traces.setdefault(failure_reason, failure_trace)
                     continue
 
             if batch_failure_counts.get("yahoo_rate_limit") == len(batch):
@@ -80,7 +77,6 @@ def run_dcf_scrape(tickers, client):
                     remaining = len(tickers) - i - len(batch)
                     if remaining > 0:
                         failure_counts["skipped_after_rate_limit"] = remaining
-                        failure_traces["skipped_after_rate_limit"] = None
                     logger.warning("Stopping DCF scrape early after repeated Yahoo rate-limited batches")
                     break
             else:
@@ -93,9 +89,6 @@ def run_dcf_scrape(tickers, client):
     logger.info("DCF scrape completed: %s errors out of %s tickers", num_errors, len(tickers))
     if failure_counts:
         logger.warning("DCF failure summary: %s", ", ".join(f"{reason}: {count}" for reason, count in sorted(failure_counts.items())))
-        for reason, failure_trace in sorted(failure_traces.items()):
-            if failure_trace:
-                logger.warning("Sample %s traceback:\n%s", reason, failure_trace)
 
     macro_db = client[db_name]["macro"]
     macro_db.update_one(
@@ -142,12 +135,12 @@ def run_comps_scrape(tickers, client, cached_yahoo_profiles=None):
 
 def main():
     tickers = get_all_tickers()
-    tickers = tickers[:400]
+    tickers = tickers
     logger.info("Tickers loaded: %s", len(tickers))
     client = get_mongo_client()
     yahoo_profiles = run_dcf_scrape(tickers, client)
-    # logger.info("Running comps scrape")
-    # run_comps_scrape(tickers, client, cached_yahoo_profiles=yahoo_profiles)
+    logger.info("Running comps scrape")
+    run_comps_scrape(tickers, client, cached_yahoo_profiles=yahoo_profiles)
 
 
 def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, db, fx_rates):
@@ -167,13 +160,12 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
         dcf_inputs = json.dumps(dcf_result["dcf_inputs"], cls=CustomEncoder)
         dcf_inputs = json.loads(dcf_inputs)
         db.update_one({"Ticker": ticker}, {"$set": dcf_inputs}, upsert=True)
-        return True, dcf_result.get("yahoo_profile"), dcf_result.get("yahoo_overview"), None, None
+        return True, dcf_result.get("yahoo_profile"), dcf_result.get("yahoo_overview"), None
     except TimeoutError:
-        return False, None, None, "timeout", traceback.format_exc()
+        return False, None, None, "timeout"
     except YFRateLimitError:
-        return False, None, None, "yahoo_rate_limit", traceback.format_exc()
+        return False, None, None, "yahoo_rate_limit"
     except Exception as e:
-        failure_trace = traceback.format_exc()
         try:
             yf_ticker = yf.Ticker(ticker)
             info = yf_ticker.get_info()
@@ -182,9 +174,9 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
                 yahoo_overview = build_yahoo_overview(yf_ticker, info)
             except Exception:
                 yahoo_overview = None
-            return False, yahoo_profile, yahoo_overview, type(e).__name__, failure_trace
+            return False, yahoo_profile, yahoo_overview, type(e).__name__
         except Exception:
-            return False, None, None, type(e).__name__, failure_trace
+            return False, None, None, type(e).__name__
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 import concurrent.futures
 import json
+import logging
 import os
 import time
 
@@ -21,6 +22,10 @@ from scrape.valuation.market_metrics import (
     get_mature_erp,
 )
 from scrape.valuation.string_mapper import StringMapper
+
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(levelname)s: %(message)s")
+logging.getLogger("yfinance").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 
 
 def run_dcf_scrape(tickers, client):
@@ -58,7 +63,7 @@ def run_dcf_scrape(tickers, client):
             if yahoo_overview:
                 yahoo_overviews[yahoo_overview["Ticker"]] = yahoo_overview
 
-    print(f"Number of DCF errors: {num_errors} out of {len(tickers)} tickers")
+    logger.info("DCF scrape completed: %s errors out of %s tickers", num_errors, len(tickers))
 
     macro_db = client[db_name]["macro"]
     macro_db.update_one(
@@ -78,7 +83,7 @@ def run_dcf_scrape(tickers, client):
     overview_records = json.loads(json.dumps(list(yahoo_overviews.values()), cls=CustomEncoder))
     for record in overview_records:
         overview_db.update_one({"Ticker": record["Ticker"]}, {"$set": record}, upsert=True)
-    print(f"Number of Yahoo overviews: {len(overview_records)} out of {len(tickers)} tickers")
+    logger.info("Yahoo overviews saved: %s out of %s tickers", len(overview_records), len(tickers))
 
     return yahoo_profiles
 
@@ -105,10 +110,10 @@ def run_comps_scrape(tickers, client, cached_yahoo_profiles=None):
 
 def main():
     tickers = get_all_tickers()
-    print("Number of tickers:", len(tickers))
+    logger.info("Tickers loaded: %s", len(tickers))
     client = get_mongo_client()
     yahoo_profiles = run_dcf_scrape(tickers, client)
-    print("Running comps scrape")
+    logger.info("Running comps scrape")
     run_comps_scrape(tickers, client, cached_yahoo_profiles=yahoo_profiles)
 
 
@@ -131,10 +136,10 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
         db.update_one({"Ticker": ticker}, {"$set": dcf_inputs}, upsert=True)
         return True, dcf_result.get("yahoo_profile"), dcf_result.get("yahoo_overview")
     except TimeoutError:
-        print(f"Ticker {ticker} timed out after {TICKER_TIMEOUT_SECONDS} seconds")
+        logger.debug("%s timed out after %s seconds", ticker, TICKER_TIMEOUT_SECONDS)
         return False, None, None
     except Exception as e:
-        print(f"Ticker {ticker} error: {e}")
+        logger.debug("%s failed: %s", ticker, e)
         return False, None, None
 
 

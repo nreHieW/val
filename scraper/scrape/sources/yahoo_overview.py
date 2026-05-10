@@ -39,7 +39,7 @@ def _extract_recommendation_mix(df: pd.DataFrame):
     for record in records:
         if record.get("period") == "0m":
             return record
-    raise ValueError("Yahoo recommendations summary missing period 0m")
+    raise ValueError("Yahoo recommendations summary missing period")
 
 
 def _extract_earnings_estimates(df: pd.DataFrame):

@@ -95,7 +95,11 @@ function EpsRow({ label, estimate }: { label: string; estimate?: EpsEstimate | n
 
 export default function OverviewTab({ overview }: { overview: TickerOverview | null }) {
   if (!overview) {
-    return <div className="min-h-[24rem]" />;
+    return (
+      <div className="min-h-[24rem] rounded-lg border border-border/50 px-5 py-6 text-sm text-muted-foreground">
+        No overview data is available for this ticker yet.
+      </div>
+    );
   }
 
   const companyName = overview.profile?.name ?? overview.profile?.shortName ?? overview.Ticker;

@@ -1,12 +1,15 @@
 import datetime
+import logging
+import time
 
 import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
 from bs4 import BeautifulSoup
+from yfinance.exceptions import YFRateLimitError
 
-from scrape.core.config import REQUEST_TIMEOUT_SECONDS, headers
+from scrape.core.config import REQUEST_TIMEOUT_SECONDS, YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS, headers
 from scrape.core.http_utils import get_proxy
 from scrape.sources.marketscreener import get_marketscreener_url, get_revenue_by_region, get_revenue_forecasts
 from scrape.sources.yahoo_overview import build_yahoo_overview
@@ -19,6 +22,8 @@ from scrape.valuation.statements import (
     get_statement_metric_series,
 )
 from scrape.valuation.string_mapper import StringMapper
+
+logger = logging.getLogger(__name__)
 
 
 def _balance_sheet_scalar(df: pd.DataFrame, key: str, default: float = 0) -> float:
@@ -171,9 +176,21 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     ttm_income_statement = quarterly_income_statement[quarterly_income_statement.columns[:4]].T.fillna(0)
     last_balance_sheet = ticker.quarterly_balance_sheet
     last_balance_sheet = last_balance_sheet[last_balance_sheet.columns[:4]].T.ffill().bfill()
-    info = ticker.get_info()
+    for attempt in range(YAHOO_INFO_RETRIES):
+        try:
+            info = ticker.get_info()
+            break
+        except YFRateLimitError:
+            if attempt == YAHOO_INFO_RETRIES - 1:
+                raise
+            time.sleep(YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1))
+
     yahoo_profile = build_yahoo_profile(info.get("symbol", ticker.ticker), info)
-    yahoo_overview = build_yahoo_overview(ticker, info)
+    try:
+        yahoo_overview = build_yahoo_overview(ticker, info)
+    except Exception as e:
+        logger.debug("%s overview skipped: %s", ticker.ticker, e)
+        yahoo_overview = None
     name = info.get("longName")
     curr_currency = info.get("financialCurrency")
     fx_rate = 1

@@ -1,4 +1,7 @@
 module.exports = {
+  turbopack: {
+    root: __dirname,
+  },
   rewrites: async () => {
     return [
       {

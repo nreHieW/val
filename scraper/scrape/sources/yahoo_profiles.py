@@ -1,4 +1,5 @@
 import concurrent.futures
+import logging
 import time
 
 import pandas as pd
@@ -6,6 +7,8 @@ import yfinance as yf
 from yfinance.exceptions import YFRateLimitError
 
 from scrape.core.config import YAHOO_INFO_MAX_WORKERS, YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS
+
+logger = logging.getLogger(__name__)
 
 
 def build_yahoo_profile(ticker, ticker_info):
@@ -129,14 +132,14 @@ def get_ttm_financials(ticker):
             return result
         except YFRateLimitError:
             if attempt == YAHOO_INFO_RETRIES - 1:
-                print(f"[ERROR] Yahoo rate limited for {ticker} TTM after {YAHOO_INFO_RETRIES} attempts")
+                logger.debug("%s TTM skipped: Yahoo rate limited after %s attempts", ticker, YAHOO_INFO_RETRIES)
                 return None
 
             sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1)
             # print(f"[WARN] Yahoo rate limited for {ticker} TTM; retrying in {sleep_seconds:.1f}s")
             time.sleep(sleep_seconds)
         except Exception as e:
-            print(f"[ERROR] Failed to fetch TTM financials for {ticker}: {e}")
+            logger.debug("%s TTM skipped: %s", ticker, e)
             return None
 
 
@@ -153,6 +156,10 @@ def compute_ttm_financials(tickers):
         if i + YAHOO_INFO_MAX_WORKERS < len(tickers):
             time.sleep(1)
 
+    missing_count = len(tickers) - len(ttm_financials_by_ticker)
+    if missing_count:
+        logger.warning("TTM financials missing for %s out of %s tickers", missing_count, len(tickers))
+
     ordered_financials = [ttm_financials_by_ticker[ticker] for ticker in tickers if ticker in ttm_financials_by_ticker]
     if not ordered_financials:
         return pd.DataFrame(columns=["Ticker"]).set_index("Ticker")
@@ -167,14 +174,14 @@ def get_info(ticker):
             return build_yahoo_profile(ticker, ticker_info)
         except YFRateLimitError:
             if attempt == YAHOO_INFO_RETRIES - 1:
-                print(f"[ERROR] Yahoo rate limited for {ticker} after {YAHOO_INFO_RETRIES} attempts")
+                logger.debug("%s profile skipped: Yahoo rate limited after %s attempts", ticker, YAHOO_INFO_RETRIES)
                 return None
 
             sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1)
             # print(f"[WARN] Yahoo rate limited for {ticker}; retrying in {sleep_seconds:.1f}s")
             time.sleep(sleep_seconds)
         except Exception as e:
-            print(f"[ERROR] Failed to fetch Yahoo profile for {ticker}: {e}")
+            logger.debug("%s profile skipped: %s", ticker, e)
             return None
 
 
@@ -199,6 +206,10 @@ def get_and_parse_yahoo(tickers, cached_profiles=None):
 
             if i + YAHOO_INFO_MAX_WORKERS < len(missing_tickers):
                 time.sleep(1)
+
+    missing_count = len(tickers) - len(profiles_by_ticker)
+    if missing_count:
+        logger.warning("Yahoo profiles missing for %s out of %s tickers", missing_count, len(tickers))
 
     ordered_profiles = [profiles_by_ticker[ticker] for ticker in tickers if ticker in profiles_by_ticker]
     if not ordered_profiles:

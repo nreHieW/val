@@ -93,7 +93,7 @@ export default function SearchBar() {
   const handleKeyDown = (event: React.KeyboardEvent) => {
     if (event.key === 'Enter' && items.length > 0) {
       const firstItem = items[0];
-      const displayText = firstItem.Ticker + "  -  " + firstItem.name;
+      const displayText = [firstItem.Ticker, firstItem.name].filter(Boolean).join("  -  ");
       const urlSlug = displayText
         .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "")
         .split(/\s+/)
@@ -127,7 +127,7 @@ export default function SearchBar() {
           {items.map((item: TickerResult, index) => {
             const ticker = item.Ticker;
             const name = item.name;
-            const displayText = ticker + "  -  " + name;
+            const displayText = [ticker, name].filter(Boolean).join("  -  ");
             const urlSlug = displayText
               .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "")
               .split(/\s+/)

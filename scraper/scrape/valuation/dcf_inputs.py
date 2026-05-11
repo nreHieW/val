@@ -1,3 +1,4 @@
+import concurrent.futures
 import datetime
 import logging
 import time
@@ -10,7 +11,6 @@ from bs4 import BeautifulSoup
 from yfinance.exceptions import YFRateLimitError
 
 from scrape.core.config import REQUEST_TIMEOUT_SECONDS, YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS, headers
-from scrape.core.http_utils import get_proxy
 from scrape.sources.marketscreener import get_marketscreener_url, get_revenue_by_region, get_revenue_forecasts
 from scrape.sources.yahoo_overview import build_yahoo_overview
 from scrape.sources.yahoo_profiles import build_yahoo_profile, normalize_quarterly_statement
@@ -38,7 +38,6 @@ def get_similar_stocks(ticker: str):
     response = requests.get(
         url,
         headers=headers,
-        proxies=get_proxy(),
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
 
@@ -176,22 +175,24 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     ttm_income_statement = quarterly_income_statement[quarterly_income_statement.columns[:4]].T.fillna(0)
     last_balance_sheet = ticker.quarterly_balance_sheet
     last_balance_sheet = last_balance_sheet[last_balance_sheet.columns[:4]].T.ffill().bfill()
+    info = {}
     for attempt in range(YAHOO_INFO_RETRIES):
         try:
-            info = ticker.get_info()
+            info = ticker.get_info() or {}
             break
         except YFRateLimitError:
             if attempt == YAHOO_INFO_RETRIES - 1:
                 raise
             time.sleep(YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1))
 
-    yahoo_profile = build_yahoo_profile(info.get("symbol", ticker.ticker), info)
+    symbol = info.get("symbol") or ticker.ticker
+    yahoo_profile = build_yahoo_profile(symbol, info)
     try:
         yahoo_overview = build_yahoo_overview(ticker, info)
     except Exception as e:
         logger.debug("%s overview skipped: %s", ticker.ticker, e)
         yahoo_overview = None
-    name = info.get("longName")
+    name = info.get("longName") or info.get("shortName") or symbol
     curr_currency = info.get("financialCurrency")
     fx_rate = 1
     if curr_currency:
@@ -244,25 +245,38 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     pretax_income_total = pretax_income_series.sum()
     effective_tax_rate = (tax_rate_series * pretax_income_series).sum() / pretax_income_total if pretax_income_total else 0
 
-    regions = region_mapper.get_closest(info["country"])
+    country = info.get("country")
+    regions = region_mapper.get_closest(country) if country else ["Global"]
 
-    industry = info["industry"]
-    sector = info["sector"]
+    industry = info.get("industry") or info.get("sector") or "Grand Total"
+    sector = info.get("sector") or industry
     avg_betas = avg_metrics["Unlevered Beta"]
     unlevered_beta, industry = get_industry_beta(industry, sector, industry_mapper, avg_betas)
-    marketscreener_url = get_marketscreener_url(info["symbol"], info["shortName"])
+    marketscreener_url = get_marketscreener_url(symbol, info.get("shortName") or info.get("longName") or "")
 
-    regional_revenues = get_revenue_by_region(info["symbol"], marketscreener_url)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        regional_revenues_future = executor.submit(get_revenue_by_region, symbol, marketscreener_url)
+        forecast_defaults_future = executor.submit(get_revenue_forecasts, marketscreener_url)
+
+        try:
+            regional_revenues = regional_revenues_future.result()
+        except Exception as e:
+            logger.debug("%s regional revenue unavailable; using country fallback: %s", symbol, e)
+            regional_revenues = {country or "Global": revenues if revenues else 1}
+        try:
+            forecast_defaults = forecast_defaults_future.result()
+        except Exception as e:
+            logger.debug("%s revenue forecasts unavailable; using defaults: %s", symbol, e)
+            forecast_defaults = {}
+
     equity_risk_premium, mapped_regional_revenues = get_regional_crps(regional_revenues, region_mapper, country_erps)
     equity_risk_premium = equity_risk_premium + mature_erp
-    _, company_spread, prob_of_failure = synthetic_rating(info["marketCap"], operating_income_ttm, interest_expense)
-    pre_tax_cost_of_debt = risk_free_rate + company_spread + country_erps[regions[0]]
+    _, company_spread, prob_of_failure = synthetic_rating(info.get("marketCap", 0), operating_income_ttm, interest_expense)
+    pre_tax_cost_of_debt = risk_free_rate + company_spread + country_erps.get(regions[0], country_erps.get("Global", 0))
 
-    target_pre_tax_operating_margin = avg_metrics["Pre-tax Operating Margin (Unadjusted)"][industry]
+    target_pre_tax_operating_margin = avg_metrics["Pre-tax Operating Margin (Unadjusted)"].get(industry, 0)
 
     operating_margin_this_year = info.get("operatingMargins", operating_income_ttm / revenues if revenues else 0)
-
-    forecast_defaults = get_revenue_forecasts(marketscreener_url)
     consensus_revenues_usd = {
         year: value * fx_rate
         for year, value in forecast_defaults.get("consensus_revenues", {}).items()
@@ -338,10 +352,20 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     target_pre_tax_operating_margin = max(target_pre_tax_operating_margin, operating_margin_next_year)
     year_of_convergence_for_margin = 5
     years_of_high_growth = 5
-    curr_sales_to_capital_ratio = revenues / (book_value_of_equity + book_value_of_debt - cash_and_marketable_securities - cross_holdings_and_other_non_operating_assets)
+    invested_capital = book_value_of_equity + book_value_of_debt - cash_and_marketable_securities - cross_holdings_and_other_non_operating_assets
+    curr_sales_to_capital_ratio = revenues / invested_capital if invested_capital else avg_metrics["Sales/Capital"].get(industry, 1)
     sales_to_capital_ratio_early = curr_sales_to_capital_ratio
-    sales_to_capital_ratio_steady = avg_metrics["Sales/Capital"][industry]
-    r_and_d_expenses = r_and_d_handler(info["symbol"], industry)
+    sales_to_capital_ratio_steady = avg_metrics["Sales/Capital"].get(industry, 1)
+    try:
+        r_and_d_expenses = r_and_d_handler(symbol, industry)
+    except Exception as e:
+        logger.debug("%s R&D expense unavailable; using empty history: %s", symbol, e)
+        r_and_d_expenses = []
+    try:
+        similar_stocks = get_similar_stocks(symbol)
+    except Exception as e:
+        logger.debug("%s similar stocks unavailable; using empty list: %s", symbol, e)
+        similar_stocks = []
     return {
         "dcf_inputs": {
             "name": name,
@@ -378,7 +402,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
                 "industry": industry,
                 "historical_revenue_growth": info.get("revenueGrowth", 0),
                 "mapped_regional_revenues": mapped_regional_revenues,
-                "similar_stocks": get_similar_stocks(info["symbol"]),
+                "similar_stocks": similar_stocks,
                 "research_and_development": r_and_d_expenses,
                 "last_updated_financials": ttm_income_statement.index[0].strftime("%Y-%m-%d"),
                 "forecast_context": {

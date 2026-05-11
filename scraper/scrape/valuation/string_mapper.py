@@ -6,7 +6,7 @@ class StringMapper:
     def __init__(self, gts: list, threshold=0):
         self.model = SentenceTransformer("Alibaba-NLP/gte-base-en-v1.5", trust_remote_code=True)
         self.gts = gts
-        self.embeddings = self.model.encode(gts)
+        self.embeddings = self.model.encode(gts, show_progress_bar=False)
         self.embeddings = self.embeddings / np.linalg.norm(self.embeddings, axis=1)[:, None]
         self.threshold = threshold
 
@@ -24,7 +24,7 @@ class StringMapper:
             candidates = sorted(candidates, key=lambda x: len(x.split()))
             return [candidates[0]]
 
-        query_embedding = self.model.encode(query)
+        query_embedding = self.model.encode(query, show_progress_bar=False)
         query_embedding = query_embedding / np.linalg.norm(query_embedding)
         similarities = np.dot(self.embeddings, query_embedding)
         indices = np.argsort(-similarities)
@@ -45,7 +45,7 @@ class StringMapper:
             candidates = sorted(candidates, key=lambda x: len(x.split()))
             return [(candidates[0], 1.0)]
 
-        query_embedding = self.model.encode(query)
+        query_embedding = self.model.encode(query, show_progress_bar=False)
         query_embedding = query_embedding / np.linalg.norm(query_embedding)
         scores = np.dot(self.embeddings, query_embedding)
         if indices_to_adjust:

@@ -1,6 +1,7 @@
 import concurrent.futures
 import datetime
 import json
+import logging
 import os
 import re
 from io import StringIO
@@ -13,8 +14,17 @@ from bs4 import BeautifulSoup
 from scrape.core.config import JSON_LOCK, MAX_WORKERS, REQUEST_TIMEOUT_SECONDS, headers
 from scrape.core.http_utils import get_htmls
 
+logger = logging.getLogger(__name__)
+
 
 def get_marketscreener_url(ticker, name: str = ""):
+    with JSON_LOCK:
+        if os.path.exists("marketscreener_links.json"):
+            with open("marketscreener_links.json", "r") as f:
+                cached_link = json.load(f).get(ticker)
+            if cached_link:
+                return cached_link
+
     search_url = "https://www.marketscreener.com/search/?q=" + "+".join(ticker.split())
     page = requests.get(search_url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
     soup = BeautifulSoup(page.content, "lxml")
@@ -43,7 +53,7 @@ def get_marketscreener_url(ticker, name: str = ""):
                     found_link = "https://www.marketscreener.com" + link
                     break
     if not found_link:
-        print(f"[INFO] Could not find {ticker} on marketscreener")
+        logger.debug("Could not find %s on marketscreener", ticker)
     else:
         with JSON_LOCK:
             if os.path.exists("marketscreener_links.json"):
@@ -60,6 +70,8 @@ def get_marketscreener_url(ticker, name: str = ""):
 
 
 def get_revenue_by_region(ticker, url):
+    if not url:
+        raise ValueError(f"No MarketScreener URL for {ticker}")
     page = requests.get(url + "company/", headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
     soup = BeautifulSoup(page.content, "lxml")
     df = None
@@ -225,7 +237,7 @@ def parse_marketscreener(marketscreener_urls):
                 dfs.append(indiv)
                 break
         except Exception as e:
-            print("[ERROR] Failed to parse Marketscreener", ticker, e)
+            logger.debug("Failed to parse Marketscreener %s: %s", ticker, e)
 
     if not dfs:
         return pd.DataFrame()

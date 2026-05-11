@@ -14,6 +14,7 @@ from scrape.core.json_util import CustomEncoder
 from scrape.core.mongo import get_mongo_client
 from scrape.core.tickers import get_all_tickers
 from scrape.sources.finviz import parse_finviz
+from scrape.sources.yahoo_market_discovery import get_sector_industries, get_similar_companies
 from scrape.sources.yahoo_overview import build_yahoo_overview
 from scrape.sources.yahoo_profiles import build_yahoo_profile, compute_ttm_financials, get_and_parse_yahoo
 from scrape.valuation.dcf_inputs import get_dcf_inputs
@@ -113,6 +114,33 @@ def run_dcf_scrape(tickers, client):
     return yahoo_profiles
 
 
+def run_market_discovery_scrape(tickers, client):
+    db_name = os.getenv("MONGODB_DB_NAME")
+    similar_db = client[db_name]["similar_companies"]
+    industries_db = client[db_name]["industries"]
+
+    logger.info("Running similar companies scrape for %s tickers", len(tickers))
+    similar_failures = 0
+    for ticker in tickers:
+        try:
+            record = get_similar_companies(ticker)
+            if record:
+                record = json.loads(json.dumps(record, cls=CustomEncoder))
+                similar_db.update_one({"Ticker": record["Ticker"]}, {"$set": record}, upsert=True)
+        except Exception:
+            similar_failures += 1
+            logger.debug("Similar companies scrape failed for %s\n%s", ticker, traceback.format_exc())
+    if similar_failures:
+        logger.warning("Similar companies scrape failures: %s", similar_failures)
+
+    logger.info("Running sector industry scrape")
+    industries = get_sector_industries()
+    industry_records = json.loads(json.dumps(industries, cls=CustomEncoder))
+    for record in industry_records:
+        industries_db.update_one({"industry_key": record["industry_key"]}, {"$set": record}, upsert=True)
+    logger.info("Industry records saved: %s", len(industry_records))
+
+
 def run_comps_scrape(tickers, client, cached_yahoo_profiles=None):
     yahoo_df = get_and_parse_yahoo(tickers, cached_profiles=cached_yahoo_profiles)
     ttm_financials_df = compute_ttm_financials(tickers)
@@ -140,6 +168,7 @@ def main():
     yahoo_profiles = run_dcf_scrape(tickers, client)
     logger.info("Running comps scrape")
     run_comps_scrape(tickers, client, cached_yahoo_profiles=yahoo_profiles)
+    run_market_discovery_scrape(tickers, client)
 
 
 def _exception_location(exc: Exception) -> str:

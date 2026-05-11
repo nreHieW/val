@@ -9,17 +9,28 @@ type TickerResult = {
   name: string;
 };
 
+const tickerSearchCache = new Map<string, TickerResult[]>();
+
 export const getTickers = async (
   query: string,
   signal?: AbortSignal
 ): Promise<TickerResult[]> => {
-  const response = await fetch(`/api/tickers?query=${encodeURIComponent(query)}`, {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return [];
+
+  const cached = tickerSearchCache.get(normalizedQuery);
+  if (cached) return cached;
+
+  const response = await fetch(`/api/tickers?query=${encodeURIComponent(normalizedQuery)}`, {
     signal,
   });
   if (!response.ok) {
     throw new Error("Failed to fetch tickers");
   }
-  return response.json();
+
+  const results = await response.json();
+  tickerSearchCache.set(normalizedQuery, results);
+  return results;
 };
 
 export default function SearchBar() {
@@ -31,8 +42,8 @@ export default function SearchBar() {
 
   useEffect(() => {
     const handler = setTimeout(() => {
-      setDebouncedSearchQuery(searchQuery);
-    }, 200);
+      setDebouncedSearchQuery(searchQuery.trim());
+    }, 150);
 
     return () => {
       clearTimeout(handler);
@@ -48,7 +59,7 @@ export default function SearchBar() {
         return;
       }
 
-      setIsLoading(true);
+      setIsLoading(!tickerSearchCache.has(debouncedSearchQuery.toLowerCase()));
       try {
         let results: TickerResult[] = await getTickers(
           debouncedSearchQuery,

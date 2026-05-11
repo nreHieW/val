@@ -12,53 +12,32 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const query = searchParams.get("query")?.trim() ?? "";
   if (!query) {
-    return new Response(JSON.stringify([]));
+    return Response.json([]);
   }
 
   const escapedQuery = escapeRegex(query);
-  const prefixPattern = new RegExp(`^${escapedQuery}`, "i");
+  const tickerPrefix = new RegExp(`^${escapeRegex(query.toUpperCase())}`);
+  const namePrefix = new RegExp(`^${escapedQuery}`, "i");
 
-  const tickers = await DCFInput.aggregate([
-    {
-      $match: {
-        $or: [{ Ticker: prefixPattern }, { name: prefixPattern }],
-      },
-    },
-    {
-      $lookup: {
-        from: "ticker_overviews",
-        localField: "Ticker",
-        foreignField: "Ticker",
-        as: "overview",
-      },
-    },
-    {
-      $addFields: {
-        overviewDoc: { $arrayElemAt: ["$overview", 0] },
-      },
-    },
-    {
-      $addFields: {
-        displayName: {
-          $ifNull: [
-            "$name",
-            {
-              $ifNull: [
-                "$overviewDoc.profile.name",
-                { $ifNull: ["$overviewDoc.profile.shortName", "$Ticker"] },
-              ],
-            },
-          ],
-        },
-        matchPriority: {
-          $cond: [{ $regexMatch: { input: "$Ticker", regex: prefixPattern } }, 0, 1],
-        },
-      },
-    },
-    { $sort: { matchPriority: 1, Ticker: 1, displayName: 1 } },
-    { $project: { _id: 0, Ticker: 1, name: "$displayName" } },
-    { $limit: SEARCH_LIMIT },
-  ]);
+  const tickerMatches = await DCFInput.find(
+    { Ticker: tickerPrefix },
+    { _id: 0, Ticker: 1, name: 1 },
+  )
+    .sort({ Ticker: 1 })
+    .limit(SEARCH_LIMIT)
+    .lean();
 
-  return new Response(JSON.stringify(tickers));
+  if (tickerMatches.length >= SEARCH_LIMIT) {
+    return Response.json(tickerMatches);
+  }
+
+  const nameMatches = await DCFInput.find(
+    { name: namePrefix, Ticker: { $nin: tickerMatches.map((item) => item.Ticker) } },
+    { _id: 0, Ticker: 1, name: 1 },
+  )
+    .sort({ name: 1, Ticker: 1 })
+    .limit(SEARCH_LIMIT - tickerMatches.length)
+    .lean();
+
+  return Response.json([...tickerMatches, ...nameMatches]);
 }

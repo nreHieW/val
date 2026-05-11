@@ -117,7 +117,7 @@ function BaseSearchBar() {
   const handleKeyDown = (event: React.KeyboardEvent) => {
     if (event.key === "Enter" && items.length > 0) {
       const firstItem = items[0];
-      const displayText = firstItem.Ticker + "  -  " + firstItem.name;
+      const displayText = [firstItem.Ticker, firstItem.name].filter(Boolean).join("  -  ");
       const urlSlug = displayText
         .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "")
         .split(/\s+/)
@@ -143,7 +143,7 @@ function BaseSearchBar() {
         onKeyDown={handleKeyDown}
       />
       {isLoading ? (
-        <div className="py-4 justify-center flex">
+        <div className="absolute top-full mt-0.5 left-0 right-0 z-50 flex justify-center py-4 rounded-b-md border border-border bg-background shadow-md">
           <Loading className="h-4 w-4" />
         </div>
       ) : hasResults ? (
@@ -151,7 +151,7 @@ function BaseSearchBar() {
           {items.map((item: TickerResult, index) => {
             const ticker = item.Ticker;
             const name = item.name;
-            const displayText = ticker + "  -  " + name;
+            const displayText = [ticker, name].filter(Boolean).join("  -  ");
             const urlSlug = displayText
               .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "")
               .split(/\s+/)

@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import time
-
+import traceback
 import pandas as pd
 import yfinance as yf
 from yfinance.exceptions import YFRateLimitError
@@ -135,12 +135,19 @@ def run_comps_scrape(tickers, client, cached_yahoo_profiles=None):
 
 def main():
     tickers = get_all_tickers()
-    tickers = tickers
     logger.info("Tickers loaded: %s", len(tickers))
     client = get_mongo_client()
     yahoo_profiles = run_dcf_scrape(tickers, client)
     logger.info("Running comps scrape")
     run_comps_scrape(tickers, client, cached_yahoo_profiles=yahoo_profiles)
+
+
+def _exception_location(exc: Exception) -> str:
+    tb = traceback.extract_tb(exc.__traceback__)
+    if not tb:
+        return type(exc).__name__
+    frame = tb[-1]
+    return f"{type(exc).__name__} at {os.path.relpath(frame.filename)}:{frame.lineno} in {frame.name}"
 
 
 def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, db, fx_rates):
@@ -166,6 +173,8 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
     except YFRateLimitError:
         return False, None, None, "yahoo_rate_limit"
     except Exception as e:
+        failure_reason = _exception_location(e)
+        logger.debug("DCF scrape failed for %s\n%s", ticker, "".join(traceback.format_exception(type(e), e, e.__traceback__)))
         try:
             yf_ticker = yf.Ticker(ticker)
             info = yf_ticker.get_info()
@@ -174,9 +183,10 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
                 yahoo_overview = build_yahoo_overview(yf_ticker, info)
             except Exception:
                 yahoo_overview = None
-            return False, yahoo_profile, yahoo_overview, type(e).__name__
+            return False, yahoo_profile, yahoo_overview, failure_reason
         except Exception:
-            return False, None, None, type(e).__name__
+            logger.debug("Yahoo fallback failed for %s\n%s", ticker, traceback.format_exc())
+            return False, None, None, failure_reason
 
 
 if __name__ == "__main__":

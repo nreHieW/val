@@ -25,14 +25,38 @@ export async function GET(request: Request) {
       },
     },
     {
+      $lookup: {
+        from: "ticker_overviews",
+        localField: "Ticker",
+        foreignField: "Ticker",
+        as: "overview",
+      },
+    },
+    {
       $addFields: {
+        overviewDoc: { $arrayElemAt: ["$overview", 0] },
+      },
+    },
+    {
+      $addFields: {
+        displayName: {
+          $ifNull: [
+            "$name",
+            {
+              $ifNull: [
+                "$overviewDoc.profile.name",
+                { $ifNull: ["$overviewDoc.profile.shortName", "$Ticker"] },
+              ],
+            },
+          ],
+        },
         matchPriority: {
           $cond: [{ $regexMatch: { input: "$Ticker", regex: prefixPattern } }, 0, 1],
         },
       },
     },
-    { $sort: { matchPriority: 1, Ticker: 1, name: 1 } },
-    { $project: { _id: 0, Ticker: 1, name: 1 } },
+    { $sort: { matchPriority: 1, Ticker: 1, displayName: 1 } },
+    { $project: { _id: 0, Ticker: 1, name: "$displayName" } },
     { $limit: SEARCH_LIMIT },
   ]);
 

@@ -192,7 +192,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     except Exception as e:
         logger.debug("%s overview skipped: %s", ticker.ticker, e)
         yahoo_overview = None
-    name = info.get("longName")
+    name = info.get("longName") or info.get("shortName") or symbol
     curr_currency = info.get("financialCurrency")
     fx_rate = 1
     if curr_currency:

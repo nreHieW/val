@@ -94,7 +94,7 @@ export default function TickerDisplayTabs({
       </div>
       <div role="tabpanel" className={activeTab === "dcf" ? "block" : "hidden"}>{children}</div>
       <div role="tabpanel" className={activeTab === "comparison" ? "block" : "hidden"}>
-        <PeerComparisonTab ticker={ticker} />
+        <PeerComparisonTab key={ticker} ticker={ticker} />
       </div>
     </div>
   );

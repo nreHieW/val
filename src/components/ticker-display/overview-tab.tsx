@@ -27,8 +27,8 @@ function formatSignedPercent(value: number | null | undefined, decimals = 1) {
 
 function truncateSummary(summary: string | null | undefined) {
   if (!summary) return "No company description is available yet.";
-  if (summary.length <= 620) return summary;
-  return `${summary.slice(0, 620).trim()}...`;
+  if (summary.length <= 800) return summary;
+  return `${summary.slice(0, 800).trim()}...`;
 }
 
 function rangePosition(overview: TickerOverview) {
@@ -83,7 +83,7 @@ function Section({
 
 function EpsRow({ label, estimate }: { label: string; estimate?: EpsEstimate | null }) {
   return (
-    <div className="grid grid-cols-[1fr_auto_auto] gap-3 border-b border-border/40 py-2.5 last:border-0">
+    <div className="grid grid-cols-[1fr_auto_auto] gap-3 border-b border-border/40 py-1.5 last:border-0">
       <span className="text-xs text-muted-foreground">{label}</span>
       <span className="text-xs tabular-nums">{formatNumber(estimate?.avg)}</span>
       <span className="text-xs tabular-nums text-muted-foreground">
@@ -93,7 +93,13 @@ function EpsRow({ label, estimate }: { label: string; estimate?: EpsEstimate | n
   );
 }
 
-export default function OverviewTab({ overview }: { overview: TickerOverview | null }) {
+export default function OverviewTab({
+  overview,
+  valuePerShare,
+}: {
+  overview: TickerOverview | null;
+  valuePerShare?: number | null;
+}) {
   if (!overview) {
     return (
       <div className="min-h-[24rem] rounded-lg border border-border/50 px-5 py-6 text-sm text-muted-foreground">
@@ -107,7 +113,13 @@ export default function OverviewTab({ overview }: { overview: TickerOverview | n
   const targetReference = target?.median ?? target?.mean;
   const upside = overview.analyst?.targetUpside;
   const dayChange = overview.market?.dayChangePercent;
+  const currentPrice = overview.market?.price;
   const rangePct = rangePosition(overview);
+
+  let dcfPct: number | null = null;
+  if (valuePerShare != null && Number.isFinite(valuePerShare) && currentPrice != null && valuePerShare > 0) {
+    dcfPct = (currentPrice / valuePerShare) * 100;
+  }
   const recommendations = overview.analyst?.recommendations?.current;
   const buyRatings = (recommendations?.strongBuy ?? 0) + (recommendations?.buy ?? 0);
   const totalRatings =
@@ -117,8 +129,8 @@ export default function OverviewTab({ overview }: { overview: TickerOverview | n
     (recommendations?.strongSell ?? 0);
 
   return (
-    <div className="space-y-8 pt-1">
-      <header className="grid gap-5 sm:grid-cols-[1fr_auto] sm:items-start">
+    <div className="space-y-5 pt-1">
+      <header>
         <div className="min-w-0">
           <p className="text-xs text-muted-foreground">{overview.Ticker}</p>
           <h1 className="mt-1 text-xl font-medium tracking-tight sm:text-2xl">
@@ -130,16 +142,6 @@ export default function OverviewTab({ overview }: { overview: TickerOverview | n
               .join(" / ") || "Company profile"}
           </p>
         </div>
-        {overview.profile?.website && (
-          <a
-            href={overview.profile.website}
-            target="_blank"
-            rel="noreferrer"
-            className="text-xs text-muted-foreground underline underline-offset-4 transition-colors hover:text-foreground"
-          >
-            Company website
-          </a>
-        )}
       </header>
 
       <section className="rounded-lg border border-border/50 px-4 py-4 sm:px-5">
@@ -149,42 +151,49 @@ export default function OverviewTab({ overview }: { overview: TickerOverview | n
             value={formatCompactMoney(overview.market?.price)}
             tone={dayChange == null ? undefined : dayChange >= 0 ? "positive" : "negative"}
           />
+          {valuePerShare != null && Number.isFinite(valuePerShare) ? (
+            <Metric
+              label="DCF Value"
+              value={`$${valuePerShare.toFixed(2)}`}
+              tone={dcfPct == null ? undefined : dcfPct > 100 ? "negative" : "positive"}
+            />
+          ) : (
+            <Metric
+              label="Analyst Upside"
+              value={formatSignedPercent(upside)}
+              tone={upside == null ? undefined : upside >= 0 ? "positive" : "negative"}
+            />
+          )}
           <Metric label="Market Cap" value={formatCompactMoney(overview.market?.marketCap)} />
-          <Metric label="Forward P/E" value={formatNumber(overview.valuation?.forwardPe)} />
           <Metric
             label="Analyst Upside"
             value={formatSignedPercent(upside)}
             tone={upside == null ? undefined : upside >= 0 ? "positive" : "negative"}
           />
         </div>
-        <div className="mt-5 grid gap-4 border-t border-border/40 pt-4 sm:grid-cols-3">
+        <div className="mt-5 grid gap-4 border-t border-border/40 pt-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Metric label="Forward P/E" value={formatNumber(overview.valuation?.forwardPe)} />
           <Metric label="Enterprise Value" value={formatCompactMoney(overview.market?.enterpriseValue)} />
           <Metric label="EV / EBITDA" value={formatNumber(overview.valuation?.enterpriseToEbitda)} />
           <Metric label="Beta" value={formatNumber(overview.market?.beta)} />
         </div>
+        {rangePct != null && (
+          <div className="mt-5 border-t border-border/40 pt-4">
+            <div className="mb-2 flex justify-between text-xxs text-muted-foreground/60">
+              <span>52-week low {formatCompactMoney(overview.market?.fiftyTwoWeekLow)}</span>
+              <span>high {formatCompactMoney(overview.market?.fiftyTwoWeekHigh)}</span>
+            </div>
+            <div className="h-1.5 rounded-full bg-muted">
+              <div
+                className="h-full rounded-full bg-foreground/70"
+                style={{ width: `${rangePct}%` }}
+              />
+            </div>
+          </div>
+        )}
       </section>
 
-      <div className="grid gap-5 lg:grid-cols-[1.25fr_0.75fr]">
-        <Section title="Business">
-          <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
-            {truncateSummary(overview.profile?.summary)}
-          </p>
-          {rangePct != null && (
-            <div className="mt-6">
-              <div className="mb-2 flex justify-between text-xxs text-muted-foreground/60">
-                <span>52-week low {formatCompactMoney(overview.market?.fiftyTwoWeekLow)}</span>
-                <span>high {formatCompactMoney(overview.market?.fiftyTwoWeekHigh)}</span>
-              </div>
-              <div className="h-1.5 rounded-full bg-muted">
-                <div
-                  className="h-full rounded-full bg-foreground/70"
-                  style={{ width: `${rangePct}%` }}
-                />
-              </div>
-            </div>
-          )}
-        </Section>
-
+      <div className="grid gap-5 lg:grid-cols-2">
         <Section title="Valuation">
           <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 text-xs">
             <dt className="text-muted-foreground">Trailing P/E</dt>
@@ -199,9 +208,7 @@ export default function OverviewTab({ overview }: { overview: TickerOverview | n
             <dd className="tabular-nums">{formatPercent(overview.valuation?.operatingMargins)}</dd>
           </dl>
         </Section>
-      </div>
 
-      <div className="grid gap-5 lg:grid-cols-3">
         <Section title="Analysts">
           <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 text-xs">
             <dt className="text-muted-foreground">Target Low</dt>
@@ -216,7 +223,9 @@ export default function OverviewTab({ overview }: { overview: TickerOverview | n
             </dd>
           </dl>
         </Section>
+      </div>
 
+      <div className="grid gap-5 lg:grid-cols-2">
         <Section title="EPS Expectations">
           <div className="grid grid-cols-[1fr_auto_auto] gap-3 pb-1 text-xxs text-muted-foreground/60">
             <span>Period</span>
@@ -241,6 +250,22 @@ export default function OverviewTab({ overview }: { overview: TickerOverview | n
           </dl>
         </Section>
       </div>
+
+      <Section title="Business">
+        <p className="max-w-3xl text-xs leading-5 text-muted-foreground">
+          {truncateSummary(overview.profile?.summary)}
+        </p>
+        {overview.profile?.website && (
+          <a
+            href={overview.profile.website}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-4 inline-block text-xxs text-muted-foreground/60 underline underline-offset-4 transition-colors hover:text-foreground"
+          >
+            Company website
+          </a>
+        )}
+      </Section>
     </div>
   );
 }

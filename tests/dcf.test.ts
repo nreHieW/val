@@ -103,6 +103,32 @@ describe("rAndDAdjustment parity with Python fixtures", () => {
   }
 });
 
+describe("dcf negative operating margin handling", () => {
+  test("models a negative next-year operating margin as an operating loss", () => {
+    const baseInputs = dcfFixture.cases[0].inputs as DcfInput;
+    const output = dcf({
+      ...baseInputs,
+      operating_margin_next_year: -0.05,
+      target_pre_tax_operating_margin: 0.12,
+      year_of_convergence_for_margin: 5,
+    });
+
+    const nextYear = output.df[1];
+    expectNumericClose(
+      nextYear.operating_margin,
+      -0.05,
+      "negative margin is preserved",
+    );
+    expectNumericClose(
+      nextYear.operating_income,
+      nextYear.revenues * -0.05,
+      "negative margin produces negative operating income",
+    );
+    expectNumericClose(nextYear.taxes, 0, "operating loss has no current tax");
+    expect(nextYear.nol).toBeGreaterThan(0);
+  });
+});
+
 describe("dcf parity with Python fixtures", () => {
   for (const testCase of dcfFixture.cases) {
     test(testCase.name, () => {

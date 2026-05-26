@@ -1,9 +1,12 @@
 import logging
+import time
 from datetime import timedelta
 
 import yfinance as yf
 from yfinance import EquityQuery, screen
 from yfinance.exceptions import YFRateLimitError
+
+from scrape.core.config import YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +32,30 @@ PERFORMANCE_PERIODS = {
     "6mo": 180,
 }
 
+SIMILAR_COMPANY_SCREEN_SIZE = 250
+
+
+def _yahoo_call(label, fn, retry_none=False):
+    for attempt in range(YAHOO_INFO_RETRIES):
+        try:
+            result = fn()
+            if result is not None or not retry_none:
+                return result
+        except YFRateLimitError:
+            if attempt == YAHOO_INFO_RETRIES - 1:
+                logger.debug("%s skipped: Yahoo rate limited after %s attempts", label, YAHOO_INFO_RETRIES)
+                return None
+        except Exception as e:
+            logger.debug("%s skipped: %s", label, e)
+            return None
+        time.sleep(YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1))
+    return None
+
 
 def get_similar_companies(source):
-    info = yf.Ticker(source).get_info()
+    info = _yahoo_call(f"{source} similar companies", lambda: yf.Ticker(source).get_info())
+    if info is None:
+        return None
     industry = info["industry"].replace(" - ", "—")
     query = EquityQuery(
         "and",
@@ -41,7 +65,7 @@ def get_similar_companies(source):
             EquityQuery("is-in", ["exchange", "NMS", "NYQ"]),
         ],
     )
-    df = screen(query, size=10, sortField="intradaymarketcap")
+    df = screen(query, size=SIMILAR_COMPANY_SCREEN_SIZE, sortField="intradaymarketcap")
     companies = [quote for quote in df["quotes"] if quote.get("symbol") != source]
     return {
         "Ticker": source,
@@ -62,10 +86,11 @@ def _performance_percent(closes, days):
 
 def _industry_performance(symbol):
     empty = {name: None for name in [*PERFORMANCE_PERIODS, "ytd"]}
-    try:
-        history = yf.Ticker(symbol).history(period="1y", interval="1d", auto_adjust=True)
-    except YFRateLimitError:
-        logger.warning("Yahoo rate limited industry performance for %s", symbol)
+    history = _yahoo_call(
+        f"{symbol} industry performance",
+        lambda: yf.Ticker(symbol).history(period="1y", interval="1d", auto_adjust=True),
+    )
+    if history is None:
         return empty
 
     closes = history["Close"].dropna()
@@ -81,10 +106,28 @@ def _industry_performance(symbol):
 def get_sector_industries():
     industries = []
     for sector_key in SECTOR_KEYS:
-        sector = yf.Sector(sector_key)
-        for industry_key, row in sector.industries.iterrows():
+        sector_data = _yahoo_call(
+            f"{sector_key} sector industries",
+            lambda: (lambda s: (s, s.industries) if s.industries is not None else None)(yf.Sector(sector_key)),
+            retry_none=True,
+        )
+        if sector_data is None:
+            logger.warning("No industries found for sector %s", sector_key)
+            continue
+        sector, sector_industries = sector_data
+
+        for industry_key, row in sector_industries.iterrows():
             industry = yf.Industry(industry_key)
-            top_companies = industry.top_companies.reset_index(names="symbol").to_dict(orient="records")
+            top_companies_df = _yahoo_call(
+                f"{industry_key} top companies",
+                lambda: industry.top_companies,
+                retry_none=True,
+            )
+            top_companies = (
+                []
+                if top_companies_df is None
+                else top_companies_df.reset_index(names="symbol").to_dict(orient="records")
+            )
             industries.append(
                 {
                     "sector_key": sector_key,

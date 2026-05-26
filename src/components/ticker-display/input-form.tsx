@@ -33,7 +33,7 @@ import { Switch } from "../ui/switch";
 const userDCFInputSchema = z.object({
   revenues: z.coerce.number(),
   revenue_growth_rate_next_year: z.coerce.number(),
-  operating_margin_next_year: z.coerce.number().min(0),
+  operating_margin_next_year: z.coerce.number(),
   compounded_annual_revenue_growth_rate: z.coerce.number(),
   target_pre_tax_operating_margin: z.coerce.number(),
   year_of_convergence_for_margin: z.coerce.number().min(0).max(10),
@@ -168,12 +168,6 @@ function InputForm({
       tooltip: "Adjust if using a different cost of capital.",
       decodeFn: (value: string) => parseFloat(value) / 100,
     },
-    {
-      displayLabel: "Years of High Growth",
-      key: "years_of_high_growth",
-      tooltip: "How long before the company reaches steady state growth. (0-10)",
-      decodeFn: (value: string) => parseFloat(value),
-    },
   ];
 
   const advancedFields: FieldValue[] = [
@@ -182,6 +176,12 @@ function InputForm({
       key: "compounded_annual_revenue_growth_rate",
       tooltip: "Expected growth rate of revenue for the next 5 years.",
       decodeFn: (value: string) => parseFloat(value) / 100,
+    },
+    {
+      displayLabel: "Years of High Growth",
+      key: "years_of_high_growth",
+      tooltip: "How long before the company reaches steady state growth. (0-10)",
+      decodeFn: (value: string) => parseFloat(value),
     },
     {
       displayLabel: "Year of Convergence for Margin",

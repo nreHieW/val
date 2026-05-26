@@ -42,7 +42,7 @@ export default async function TickerDisplay({
   return (
     <TickerDisplayTabs
       ticker={ticker}
-      overview={<OverviewTab overview={overview} />}
+      overview={<OverviewTab overview={overview} valuePerShare={value_per_share} />}
     >
       <div className="space-y-0">
         <TopCard

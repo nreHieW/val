@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { Plus, X } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { getTickers } from "../searchbar/search-bar";
 import PeerMetricsTable from "./peer-metrics-table";
@@ -55,6 +55,7 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
   const [peers, setPeers] = useState<string[]>(() =>
     parsePeers(searchParams.get("peers"), normalizedMainTicker),
   );
+  const [suggestedPeers, setSuggestedPeers] = useState<string[]>([]);
   const [rowsState, setRowsState] = useState<{
     key: string;
     rows: FinancialComparisonRow[];
@@ -63,6 +64,29 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
     parseVisibleMetrics(searchParams.get("metrics")),
   );
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(`/api/similar-companies?ticker=${encodeURIComponent(normalizedMainTicker)}`, {
+      signal: controller.signal,
+      cache: "no-store",
+    })
+      .then((response) => (response.ok ? response.json() : { tickers: [] }))
+      .then((data: { tickers?: string[] }) => {
+        const similarPeers = parsePeers(
+          Array.isArray(data.tickers) ? data.tickers.join(",") : "",
+          normalizedMainTicker,
+        );
+        setSuggestedPeers(similarPeers);
+      })
+      .catch((error) => {
+        if ((error as DOMException).name !== "AbortError") {
+          setSuggestedPeers([]);
+        }
+      });
+
+    return () => controller.abort();
+  }, [normalizedMainTicker]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -160,6 +184,11 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
           result.Ticker.toUpperCase() !== normalizedMainTicker,
       ),
     [peers, searchResults, normalizedMainTicker],
+  );
+
+  const availableSuggestions = useMemo(
+    () => suggestedPeers.filter((peer) => !peers.includes(peer)).slice(0, 40),
+    [peers, suggestedPeers],
   );
 
   function addPeer(tickerToAdd: string) {
@@ -269,6 +298,23 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
             </button>
           )}
         </div>
+
+        {availableSuggestions.length > 0 && (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <span className="text-xs text-muted-foreground">Suggested:</span>
+            {availableSuggestions.map((peerTicker) => (
+              <button
+                key={peerTicker}
+                type="button"
+                className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-foreground/30 hover:bg-foreground/[0.04] hover:text-foreground"
+                onClick={() => addPeer(peerTicker)}
+              >
+                <Plus className="h-3 w-3" />
+                {peerTicker}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Metric toggles */}

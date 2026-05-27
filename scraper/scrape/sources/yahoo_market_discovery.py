@@ -66,13 +66,12 @@ def get_similar_companies(source):
         ],
     )
     df = screen(query, size=SIMILAR_COMPANY_SCREEN_SIZE, sortField="intradaymarketcap")
-    companies = [quote for quote in df["quotes"] if quote.get("symbol") != source]
+    similar_tickers = [quote["symbol"] for quote in df["quotes"] if quote.get("symbol") != source and quote.get("symbol")]
     return {
         "Ticker": source,
         "sector": info["sector"],
         "industry": info["industry"],
-        "similar_companies": companies,
-        "similar_tickers": [company["symbol"] for company in companies],
+        "similar_tickers": similar_tickers,
     }
 
 

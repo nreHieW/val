@@ -126,7 +126,11 @@ def run_market_discovery_scrape(tickers, client):
             record = get_similar_companies(ticker)
             if record:
                 record = json.loads(json.dumps(record, cls=CustomEncoder))
-                similar_db.update_one({"Ticker": record["Ticker"]}, {"$set": record}, upsert=True)
+                similar_db.update_one(
+                    {"Ticker": record["Ticker"]},
+                    {"$set": record, "$unset": {"similar_companies": ""}},
+                    upsert=True,
+                )
         except Exception:
             similar_failures += 1
             logger.debug("Similar companies scrape failed for %s\n%s", ticker, traceback.format_exc())
@@ -147,9 +151,7 @@ def run_comps_scrape(tickers, client, cached_yahoo_profiles=None):
     finviz_df = parse_finviz(tickers)
 
     combined = pd.concat([yahoo_df, ttm_financials_df, finviz_df], axis=1, join="outer")
-    combined = combined.fillna(0)
-    if "TTM Period End" in combined.columns:
-        combined["TTM Period End"] = combined["TTM Period End"].replace(0, None)
+    combined = combined.astype(object).where(pd.notna(combined), None)
     combined.reset_index(inplace=True)
     combined = combined.rename(columns={"index": "Ticker"})
     combined.sort_values("Ticker", inplace=True)

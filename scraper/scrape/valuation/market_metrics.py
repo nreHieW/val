@@ -9,7 +9,12 @@ from scrape.valuation.string_mapper import StringMapper
 def get_exchange_rates():
     fx_rate = {}
     for currency in CURRENCIES:
-        fx_rate[currency] = yf.Ticker(currency + "USD=X").history().Close.iloc[-1].item()
+        if currency == "USD":
+            fx_rate[currency] = 1.0
+            continue
+        history = yf.Ticker(currency + "USD=X").history(period="5d")
+        close = history.Close.dropna()
+        fx_rate[currency] = close.iloc[-1].item() if not close.empty else 1.0
     return fx_rate
 
 
@@ -108,7 +113,7 @@ def synthetic_rating(market_cap, operating_income, interest_expense):
     else:
         interest_coverage_rato = operating_income / interest_expense
 
-    rating, spread = None, None
+    rating, spread = "D", "20.00%"
     for low, high, r, s in rating_mapping:
         if low <= interest_coverage_rato <= high:
             rating, spread = r, s
@@ -116,7 +121,7 @@ def synthetic_rating(market_cap, operating_income, interest_expense):
     if operating_income < 0:
         rating = "BB"
         spread = rating_mapping[7][3]
-    default_prob = {
+    default_probabilities = {
         "AAA": 0.70,
         "AA": 0.72,
         "A+": 0.72,
@@ -132,10 +137,9 @@ def synthetic_rating(market_cap, operating_income, interest_expense):
         "CC": 50.38,
         "C": 50.38,
         "D": 50.38,
-    }[
-        rating
-    ] / 100  # in percentages
-    spread = float(s.replace("%", "")) / 100
+    }
+    default_prob = default_probabilities[rating] / 100
+    spread = float(spread.replace("%", "")) / 100
     return rating, spread, default_prob
 
 

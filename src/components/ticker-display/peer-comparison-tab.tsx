@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Plus, X } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { getTickers } from "../searchbar/search-bar";
-import PeerMetricsTable from "./peer-metrics-table";
+import PeerComparisonPanels from "./peer-comparison-panels";
 import {
   FinancialComparisonRow,
   METRICS,
@@ -341,9 +341,8 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
         </div>
       </div>
 
-      {/* Table */}
       <div className={isLoadingRows ? "opacity-60 transition-opacity" : "transition-opacity"}>
-        <PeerMetricsTable
+        <PeerComparisonPanels
           rows={rows}
           mainTicker={normalizedMainTicker}
           visibleMetrics={visibleMetrics}

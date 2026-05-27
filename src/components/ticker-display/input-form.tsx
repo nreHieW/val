@@ -151,6 +151,12 @@ function InputForm({
       decodeFn: (value: string) => parseFloat(value) / 100,
     },
     {
+      displayLabel: "Compounded Annual Revenue Growth %",
+      key: "compounded_annual_revenue_growth_rate",
+      tooltip: "Expected growth rate of revenue for the next 5 years.",
+      decodeFn: (value: string) => parseFloat(value) / 100,
+    },
+    {
       displayLabel: "Next Year Operating Margin %",
       key: "operating_margin_next_year",
       tooltip: "Expected operating margin for the next year.",
@@ -162,19 +168,13 @@ function InputForm({
       tooltip: "Target pre-tax operating margin in steady state.",
       decodeFn: (value: string) => parseFloat(value) / 100,
     },
-    {
-      displayLabel: "Discount Rate %",
-      key: "discount_rate",
-      tooltip: "Adjust if using a different cost of capital.",
-      decodeFn: (value: string) => parseFloat(value) / 100,
-    },
   ];
 
   const advancedFields: FieldValue[] = [
     {
-      displayLabel: "Compounded Annual Revenue Growth %",
-      key: "compounded_annual_revenue_growth_rate",
-      tooltip: "Expected growth rate of revenue for the next 5 years.",
+      displayLabel: "Discount Rate %",
+      key: "discount_rate",
+      tooltip: "Adjust if using a different cost of capital.",
       decodeFn: (value: string) => parseFloat(value) / 100,
     },
     {

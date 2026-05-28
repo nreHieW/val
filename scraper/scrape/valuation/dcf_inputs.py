@@ -33,6 +33,23 @@ def _balance_sheet_scalar(df: pd.DataFrame, key: str, default: float = 0) -> flo
     return float(default) if pd.isna(val) else float(val)
 
 
+def _usd_fx_rate(currency: str | None, fx_rates: dict) -> float:
+    """Return the USD conversion rate for one unit of currency."""
+    if not currency or currency == "USD":
+        return 1.0
+
+    resolved = fx_rates.get(currency)
+    if resolved:
+        return float(resolved)
+
+    history = yf.Ticker(f"{currency}USD=X").history(period="5d")
+    close = history.Close.dropna()
+    if not close.empty:
+        return float(close.iloc[-1].item())
+
+    raise ValueError(f"Missing USD FX rate for {currency}")
+
+
 def get_similar_stocks(ticker: str):
     url = f"https://www.tipranks.com/stocks/{ticker.lower()}/similar-stocks"
     response = requests.get(
@@ -194,17 +211,14 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
         yahoo_overview = None
     name = info.get("longName") or info.get("shortName") or symbol
     curr_currency = info.get("financialCurrency")
-    fx_rate = 1
-    if curr_currency:
-        resolved_fx_rate = fx_rates.get(curr_currency)
-        if resolved_fx_rate:
-            fx_rate = resolved_fx_rate
-            last_balance_sheet = last_balance_sheet.apply(lambda x: x * fx_rate)
-            ttm_income_statement["Operating Revenue"] = ttm_income_statement.get("Operating Revenue", 0) * fx_rate
-            ttm_income_statement["Interest Expense"] = ttm_income_statement.get("Interest Expense", 0) * fx_rate
-            ttm_income_statement["Pretax Income"] = ttm_income_statement.get("Pretax Income", 0) * fx_rate
-            ttm_income_statement["Net Income"] = ttm_income_statement.get("Net Income", 0) * fx_rate
-            ttm_income_statement["Operating Income"] = ttm_income_statement.get("Operating Income", 0) * fx_rate
+    fx_rate = _usd_fx_rate(curr_currency, fx_rates)
+    if fx_rate != 1:
+        last_balance_sheet = last_balance_sheet.apply(lambda x: x * fx_rate)
+        ttm_income_statement["Operating Revenue"] = ttm_income_statement.get("Operating Revenue", 0) * fx_rate
+        ttm_income_statement["Interest Expense"] = ttm_income_statement.get("Interest Expense", 0) * fx_rate
+        ttm_income_statement["Pretax Income"] = ttm_income_statement.get("Pretax Income", 0) * fx_rate
+        ttm_income_statement["Net Income"] = ttm_income_statement.get("Net Income", 0) * fx_rate
+        ttm_income_statement["Operating Income"] = ttm_income_statement.get("Operating Income", 0) * fx_rate
 
     ttm_columns = list(quarterly_income_statement.columns[:4])
     revenue_series = get_statement_metric_series(
@@ -277,12 +291,13 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     target_pre_tax_operating_margin = avg_metrics["Pre-tax Operating Margin (Unadjusted)"].get(industry, 0)
 
     operating_margin_this_year = info.get("operatingMargins", operating_income_ttm / revenues if revenues else 0)
+    forecast_fx_rate = _usd_fx_rate(forecast_defaults.get("currency") or curr_currency, fx_rates)
     consensus_revenues_usd = {
-        year: value * fx_rate
+        year: value * forecast_fx_rate
         for year, value in forecast_defaults.get("consensus_revenues", {}).items()
     }
     consensus_ebit_usd = {
-        year: value * fx_rate
+        year: value * forecast_fx_rate
         for year, value in forecast_defaults.get("consensus_ebit", {}).items()
     }
     fiscal_bridge_context = build_fiscal_bridge_context(info, quarterly_income_statement)

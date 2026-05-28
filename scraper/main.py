@@ -160,7 +160,11 @@ def run_comps_scrape(tickers, client, cached_yahoo_profiles=None):
     data = combined.to_dict(orient="records")
     data = json.loads(json.dumps(data, cls=CustomEncoder))
     for record in data:
-        db.update_one({"Ticker": record["Ticker"]}, {"$set": record}, upsert=True)
+        # Yahoo occasionally rate-limits or returns partial profile data. Avoid
+        # replacing previously good comparison fields with nulls; missing values
+        # are simply left unchanged until the next successful scrape.
+        cleaned_record = {key: value for key, value in record.items() if value is not None}
+        db.update_one({"Ticker": record["Ticker"]}, {"$set": cleaned_record}, upsert=True)
 
 
 def main():

@@ -5,6 +5,7 @@ import time
 import numpy as np
 import requests
 from bs4 import BeautifulSoup
+from curl_cffi import requests as curl_requests
 
 from scrape.core.config import MAX_WORKERS, REQUEST_TIMEOUT_SECONDS, headers
 
@@ -41,11 +42,28 @@ def get_proxy():
     return {"http": PROXIES[idx], "https": PROXIES[idx]}
 
 
-def fetch_html(url, retries=2, sleep_seconds=10, use_proxy=False):
+def browser_get(url, **kwargs):
+    """GET a page using a real browser TLS fingerprint.
+
+    Use this for sites that reject plain requests with bot-protection 403s.
+    """
+    request_headers = kwargs.pop("headers", headers)
+    return curl_requests.get(
+        url,
+        headers=request_headers,
+        impersonate=kwargs.pop("impersonate", "chrome124"),
+        timeout=kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS),
+        **kwargs,
+    )
+
+
+def fetch_html(url, retries=2, sleep_seconds=10, use_proxy=False, browser=False):
     last_error: Exception | None = None
     for attempt in range(retries):
         try:
             proxies = get_proxy() if use_proxy else None
+            if browser:
+                return browser_get(url, proxies=proxies).text
             return requests.get(url, headers=headers, proxies=proxies, timeout=REQUEST_TIMEOUT_SECONDS).text
         except Exception as e:
             last_error = e
@@ -56,12 +74,12 @@ def fetch_html(url, retries=2, sleep_seconds=10, use_proxy=False):
     raise RuntimeError("fetch_html exhausted retries with no exception")
 
 
-def get_htmls(urls, use_proxy=False, workers=MAX_WORKERS):
+def get_htmls(urls, use_proxy=False, workers=MAX_WORKERS, browser=False):
     html_responses = []
     for i in range(0, len(urls), workers):
         batch = urls[i : i + workers]
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(batch))) as executor:
-            batch_htmls = list(executor.map(lambda u: fetch_html(u, use_proxy=use_proxy), batch))
+            batch_htmls = list(executor.map(lambda u: fetch_html(u, use_proxy=use_proxy, browser=browser), batch))
             html_responses.extend(batch_htmls)
         time.sleep(1)
     return html_responses

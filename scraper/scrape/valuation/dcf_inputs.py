@@ -5,12 +5,10 @@ import time
 
 import numpy as np
 import pandas as pd
-import requests
 import yfinance as yf
-from bs4 import BeautifulSoup
 from yfinance.exceptions import YFRateLimitError
 
-from scrape.core.config import REQUEST_TIMEOUT_SECONDS, YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS, headers
+from scrape.core.config import YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS
 from scrape.sources.marketscreener import get_marketscreener_url, get_revenue_by_region, get_revenue_forecasts
 from scrape.sources.yahoo_overview import build_yahoo_overview
 from scrape.sources.yahoo_profiles import build_yahoo_profile, normalize_quarterly_statement
@@ -50,30 +48,14 @@ def _usd_fx_rate(currency: str | None, fx_rates: dict) -> float:
     raise ValueError(f"Missing USD FX rate for {currency}")
 
 
-def get_similar_stocks(ticker: str):
-    url = f"https://www.tipranks.com/stocks/{ticker.lower()}/similar-stocks"
-    response = requests.get(
-        url,
-        headers=headers,
-        timeout=REQUEST_TIMEOUT_SECONDS,
+def r_and_d_handler(income_statement: pd.DataFrame, industry: str):
+    r_and_d_series = get_statement_metric_series(
+        income_statement,
+        ["Research And Development", "Research Development"],
     )
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    return [x.text for x in soup.find_all("a", {"data-link": "stock"})]
-
-
-def r_and_d_handler(ticker, industry):
-    url = f"https://ycharts.com/companies/{ticker.upper()}/r_and_d_expense_ttm"
-    response = requests.get(
-        url,
-        headers={"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.142 Safari/537.36"},
-        timeout=REQUEST_TIMEOUT_SECONDS,
-    )
-    soup = BeautifulSoup(response.text, "html.parser")
-    htmls = soup.find_all("table")
-    df = pd.concat([pd.read_html(str(htmls))[0], pd.read_html(str(htmls))[1]]).iloc[::4]
-    df["Value"] = df["Value"].apply(lambda x: {"B": 10**9, "M": 10**6, "K": 10**3}.get(x[-1], 1) * float(x[:-1]))
-    expenses = df["Value"].tolist()
+    expenses = [float(value) for value in r_and_d_series.dropna().tolist() if value > 0]
+    if not expenses:
+        raise ValueError("No R&D expense history")
     num_years = {
         "Advertising": 2,
         "Aerospace/Defense": 10,
@@ -372,15 +354,10 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     sales_to_capital_ratio_early = curr_sales_to_capital_ratio
     sales_to_capital_ratio_steady = avg_metrics["Sales/Capital"].get(industry, 1)
     try:
-        r_and_d_expenses = r_and_d_handler(symbol, industry)
+        r_and_d_expenses = r_and_d_handler(ticker.income_stmt, industry)
     except Exception as e:
         logger.debug("%s R&D expense unavailable; using empty history: %s", symbol, e)
         r_and_d_expenses = []
-    try:
-        similar_stocks = get_similar_stocks(symbol)
-    except Exception as e:
-        logger.debug("%s similar stocks unavailable; using empty list: %s", symbol, e)
-        similar_stocks = []
     return {
         "dcf_inputs": {
             "name": name,
@@ -417,7 +394,6 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
                 "industry": industry,
                 "historical_revenue_growth": info.get("revenueGrowth", 0),
                 "mapped_regional_revenues": mapped_regional_revenues,
-                "similar_stocks": similar_stocks,
                 "research_and_development": r_and_d_expenses,
                 "last_updated_financials": ttm_income_statement.index[0].strftime("%Y-%m-%d"),
                 "forecast_context": {

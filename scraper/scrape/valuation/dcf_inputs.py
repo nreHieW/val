@@ -1,6 +1,7 @@
 import concurrent.futures
 import datetime
 import logging
+import random
 import time
 
 import numpy as np
@@ -22,6 +23,25 @@ from scrape.valuation.statements import (
 from scrape.valuation.string_mapper import StringMapper
 
 logger = logging.getLogger(__name__)
+
+
+def _is_transient_yahoo_error(exc):
+    if isinstance(exc, (YFRateLimitError, TimeoutError, ConnectionError, IndexError)):
+        return True
+    message = str(exc).lower()
+    return any(token in message for token in ("rate limit", "too many requests", "crumb", "cookie", "timeout"))
+
+
+def _with_yahoo_retries(label, func):
+    for attempt in range(YAHOO_INFO_RETRIES):
+        try:
+            return func()
+        except Exception as exc:
+            if attempt == YAHOO_INFO_RETRIES - 1 or not _is_transient_yahoo_error(exc):
+                raise
+            sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1) + random.uniform(0, 0.75)
+            logger.debug("%s Yahoo failure (%s); retrying in %.1fs", label, exc, sleep_seconds)
+            time.sleep(sleep_seconds)
 
 
 def _balance_sheet_scalar(df: pd.DataFrame, key: str, default: float = 0) -> float:
@@ -170,19 +190,19 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     value_of_options = 0
 
     ticker = yf.Ticker(ticker)
-    quarterly_income_statement = normalize_quarterly_statement(ticker.quarterly_income_stmt)
-    ttm_income_statement = quarterly_income_statement[quarterly_income_statement.columns[:4]].T.fillna(0)
-    last_balance_sheet = ticker.quarterly_balance_sheet
-    last_balance_sheet = last_balance_sheet[last_balance_sheet.columns[:4]].T.ffill().bfill()
-    info = {}
-    for attempt in range(YAHOO_INFO_RETRIES):
-        try:
-            info = ticker.get_info() or {}
-            break
-        except YFRateLimitError:
-            if attempt == YAHOO_INFO_RETRIES - 1:
-                raise
-            time.sleep(YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1))
+    quarterly_income_statement = normalize_quarterly_statement(
+        _with_yahoo_retries(ticker.ticker + " quarterly_income_stmt", lambda: ticker.quarterly_income_stmt)
+    )
+    if quarterly_income_statement.empty:
+        raise ValueError("missing_quarterly_income_statement")
+    ttm_columns = list(quarterly_income_statement.columns[:4])
+    ttm_income_statement = quarterly_income_statement.loc[:, ttm_columns].T.fillna(0)
+    last_balance_sheet = _with_yahoo_retries(ticker.ticker + " balance_sheet", lambda: ticker.quarterly_balance_sheet)
+    if last_balance_sheet.empty:
+        last_balance_sheet = pd.DataFrame([{}])
+    else:
+        last_balance_sheet = last_balance_sheet[last_balance_sheet.columns[:4]].T.ffill().bfill()
+    info = _with_yahoo_retries(ticker.ticker + " info", lambda: ticker.get_info() or {})
 
     symbol = info.get("symbol") or ticker.ticker
     yahoo_profile = build_yahoo_profile(symbol, info)
@@ -202,7 +222,6 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
         ttm_income_statement["Net Income"] = ttm_income_statement.get("Net Income", 0) * fx_rate
         ttm_income_statement["Operating Income"] = ttm_income_statement.get("Operating Income", 0) * fx_rate
 
-    ttm_columns = list(quarterly_income_statement.columns[:4])
     revenue_series = get_statement_metric_series(
         quarterly_income_statement,
         ["Total Revenue", "Operating Revenue", "Revenue"],
@@ -354,7 +373,8 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     sales_to_capital_ratio_early = curr_sales_to_capital_ratio
     sales_to_capital_ratio_steady = avg_metrics["Sales/Capital"].get(industry, 1)
     try:
-        r_and_d_expenses = r_and_d_handler(ticker.income_stmt, industry)
+        annual_income_stmt = _with_yahoo_retries(ticker.ticker + " income_stmt", lambda: ticker.income_stmt)
+        r_and_d_expenses = r_and_d_handler(annual_income_stmt, industry)
     except Exception as e:
         logger.debug("%s R&D expense unavailable; using empty history: %s", symbol, e)
         r_and_d_expenses = []

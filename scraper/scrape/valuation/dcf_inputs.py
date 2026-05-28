@@ -25,6 +25,20 @@ from scrape.valuation.string_mapper import StringMapper
 logger = logging.getLogger(__name__)
 
 
+class MissingFinancialStatements(ValueError):
+    """Raised when Yahoo has no usable financial statements for DCF valuation."""
+
+
+_CURRENCY_ALIASES = {
+    "IN": "INR",
+    "RS": "INR",
+    "RMB": "CNY",
+    "CNH": "CNY",
+    "GB PENCE": "GBX",
+    "PENCE": "GBX",
+}
+
+
 def _is_transient_yahoo_error(exc):
     if isinstance(exc, (YFRateLimitError, TimeoutError, ConnectionError, IndexError)):
         return True
@@ -61,7 +75,7 @@ def _usd_fx_rate(currency: str | None, fx_rates: dict) -> float:
     if not currency:
         return 1.0
 
-    currency = str(currency).strip().upper()
+    currency = _CURRENCY_ALIASES.get(str(currency).strip().upper(), str(currency).strip().upper())
     if currency == "USD":
         return 1.0
 
@@ -105,7 +119,7 @@ def _income_statement_for_dcf(ticker: yf.Ticker) -> tuple[pd.DataFrame, bool]:
         logger.warning("%s missing quarterly income statement; using latest annual periods for DCF inputs", ticker.ticker)
         return annual, True
 
-    logger.warning("%s missing both quarterly and annual income statements; cannot build DCF inputs", ticker.ticker)
+    logger.info("%s missing both quarterly and annual income statements; skipping DCF inputs", ticker.ticker)
     return pd.DataFrame(), False
 
 
@@ -233,7 +247,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     ticker = yf.Ticker(ticker)
     quarterly_income_statement, using_annual_income_statement = _income_statement_for_dcf(ticker)
     if quarterly_income_statement.empty:
-        raise ValueError(f"missing_income_statement:{ticker.ticker}")
+        raise MissingFinancialStatements(f"missing_income_statement:{ticker.ticker}")
     ttm_columns = list(quarterly_income_statement.columns[:1] if using_annual_income_statement else quarterly_income_statement.columns[:4])
     ttm_income_statement = quarterly_income_statement.loc[:, ttm_columns].T.fillna(0)
     last_balance_sheet = _with_yahoo_retries(ticker.ticker + " quarterly_balance_sheet", lambda: ticker.quarterly_balance_sheet)

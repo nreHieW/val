@@ -52,20 +52,61 @@ def _balance_sheet_scalar(df: pd.DataFrame, key: str, default: float = 0) -> flo
 
 
 def _usd_fx_rate(currency: str | None, fx_rates: dict) -> float:
-    """Return the USD conversion rate for one unit of currency."""
-    if not currency or currency == "USD":
+    """Return the USD conversion rate for one unit of currency.
+
+    Missing FX data should not kill the entire DCF run. When Yahoo and the
+    supplied table both miss a rate, keep the scrape moving with a 1.0 fallback
+    and emit a warning that includes the Yahoo pair we attempted.
+    """
+    if not currency:
+        return 1.0
+
+    currency = str(currency).strip().upper()
+    if currency == "USD":
         return 1.0
 
     resolved = fx_rates.get(currency)
     if resolved:
         return float(resolved)
 
-    history = yf.Ticker(f"{currency}USD=X").history(period="5d")
-    close = history.Close.dropna()
-    if not close.empty:
-        return float(close.iloc[-1].item())
+    # Yahoo sometimes reports London prices in pence (GBX/GBP=X). DCF
+    # financial statements are usually already in GBP, but handle pence if seen.
+    if currency in {"GBX", "GBP=X"}:
+        resolved = fx_rates.get("GBP")
+        if resolved:
+            return float(resolved) / 100
 
-    raise ValueError(f"Missing USD FX rate for {currency}")
+    yahoo_pair = f"{currency}USD=X"
+    try:
+        history = yf.Ticker(yahoo_pair).history(period="5d")
+        close = history.Close.dropna()
+        if not close.empty:
+            return float(close.iloc[-1].item())
+    except Exception as exc:
+        logger.warning("FX lookup failed for %s via %s: %s", currency, yahoo_pair, exc)
+        return 1.0
+
+    logger.warning("Missing USD FX rate for %s via %s; using 1.0 fallback", currency, yahoo_pair)
+    return 1.0
+
+
+def _income_statement_for_dcf(ticker: yf.Ticker) -> tuple[pd.DataFrame, bool]:
+    """Prefer quarterly income statement; fall back to annual when Yahoo has no quarterlies."""
+    quarterly = normalize_quarterly_statement(
+        _with_yahoo_retries(ticker.ticker + " quarterly_income_stmt", lambda: ticker.quarterly_income_stmt)
+    )
+    if not quarterly.empty:
+        return quarterly, False
+
+    annual = normalize_quarterly_statement(
+        _with_yahoo_retries(ticker.ticker + " income_stmt", lambda: ticker.income_stmt)
+    )
+    if not annual.empty:
+        logger.warning("%s missing quarterly income statement; using latest annual periods for DCF inputs", ticker.ticker)
+        return annual, True
+
+    logger.warning("%s missing both quarterly and annual income statements; cannot build DCF inputs", ticker.ticker)
+    return pd.DataFrame(), False
 
 
 def r_and_d_handler(income_statement: pd.DataFrame, industry: str):
@@ -190,14 +231,16 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     value_of_options = 0
 
     ticker = yf.Ticker(ticker)
-    quarterly_income_statement = normalize_quarterly_statement(
-        _with_yahoo_retries(ticker.ticker + " quarterly_income_stmt", lambda: ticker.quarterly_income_stmt)
-    )
+    quarterly_income_statement, using_annual_income_statement = _income_statement_for_dcf(ticker)
     if quarterly_income_statement.empty:
-        raise ValueError("missing_quarterly_income_statement")
-    ttm_columns = list(quarterly_income_statement.columns[:4])
+        raise ValueError(f"missing_income_statement:{ticker.ticker}")
+    ttm_columns = list(quarterly_income_statement.columns[:1] if using_annual_income_statement else quarterly_income_statement.columns[:4])
     ttm_income_statement = quarterly_income_statement.loc[:, ttm_columns].T.fillna(0)
-    last_balance_sheet = _with_yahoo_retries(ticker.ticker + " balance_sheet", lambda: ticker.quarterly_balance_sheet)
+    last_balance_sheet = _with_yahoo_retries(ticker.ticker + " quarterly_balance_sheet", lambda: ticker.quarterly_balance_sheet)
+    if last_balance_sheet.empty:
+        last_balance_sheet = _with_yahoo_retries(ticker.ticker + " balance_sheet", lambda: ticker.balance_sheet)
+        if not last_balance_sheet.empty:
+            logger.warning("%s missing quarterly balance sheet; using latest annual balance sheet", ticker.ticker)
     if last_balance_sheet.empty:
         last_balance_sheet = pd.DataFrame([{}])
     else:

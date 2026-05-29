@@ -14,8 +14,8 @@ headers = {
     "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.142 Safari/537.36"
 }
 
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "8"))
-YAHOO_INFO_MAX_WORKERS = int(os.getenv("YAHOO_INFO_MAX_WORKERS", "5"))
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "12"))
+YAHOO_INFO_MAX_WORKERS = int(os.getenv("YAHOO_INFO_MAX_WORKERS", "8"))
 YAHOO_INFO_RETRIES = int(os.getenv("YAHOO_INFO_RETRIES", "3"))
 YAHOO_INFO_RETRY_SLEEP_SECONDS = float(os.getenv("YAHOO_INFO_RETRY_SLEEP_SECONDS", "5"))
 YAHOO_CALL_MAX_CONCURRENCY = int(os.getenv("YAHOO_CALL_MAX_CONCURRENCY", "2"))

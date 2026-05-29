@@ -1,19 +1,16 @@
 import concurrent.futures
 import datetime
 import logging
-import time
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 from bs4 import BeautifulSoup
-from yfinance.exceptions import YFRateLimitError
 
-from scrape.core.config import REQUEST_TIMEOUT_SECONDS, YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS, headers
+from scrape.core.config import REQUEST_TIMEOUT_SECONDS, headers
 from scrape.core.http_utils import request_get
 from scrape.sources.marketscreener import get_marketscreener_url, get_revenue_by_region, get_revenue_forecasts
-from scrape.sources.yahoo_overview import build_yahoo_overview
-from scrape.sources.yahoo_profiles import build_yahoo_profile, get_yahoo_info, normalize_quarterly_statement
+from scrape.sources.yahoo_profiles import build_yahoo_profile
+from scrape.sources.yahoo_snapshot import YahooSnapshot
 from scrape.valuation.market_metrics import get_industry_beta, get_regional_crps, synthetic_rating
 from scrape.valuation.statements import (
     bridge_fiscal_year_values,
@@ -164,34 +161,25 @@ def r_and_d_handler(ticker, industry):
     return expenses
 
 
-def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper, avg_metrics: dict, industry_mapper: StringMapper, mature_erp: float, risk_free_rate: float, fx_rates: dict):
+def get_dcf_inputs(snapshot: YahooSnapshot, country_erps: dict, region_mapper: StringMapper, avg_metrics: dict, industry_mapper: StringMapper, mature_erp: float, risk_free_rate: float, fx_rates: dict):
     # Defaults
     average_maturity = 5
     marginal_tax_rate = 0.21
     value_of_options = 0
 
-    ticker = yf.Ticker(ticker)
-    quarterly_income_statement = normalize_quarterly_statement(ticker.quarterly_income_stmt)
-    ttm_income_statement = quarterly_income_statement[quarterly_income_statement.columns[:4]].T.fillna(0)
-    last_balance_sheet = ticker.quarterly_balance_sheet
-    last_balance_sheet = last_balance_sheet[last_balance_sheet.columns[:4]].T.ffill().bfill()
-    info = {}
-    for attempt in range(YAHOO_INFO_RETRIES):
-        try:
-            info = get_yahoo_info(ticker.ticker) or {}
-            break
-        except YFRateLimitError:
-            if attempt == YAHOO_INFO_RETRIES - 1:
-                raise
-            time.sleep(YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1))
+    if snapshot.quarterly_income_stmt.empty:
+        raise ValueError(f"{snapshot.ticker} missing quarterly income statement")
+    if snapshot.quarterly_balance_sheet.empty:
+        raise ValueError(f"{snapshot.ticker} missing quarterly balance sheet")
 
-    symbol = info.get("symbol") or ticker.ticker
+    quarterly_income_statement = snapshot.quarterly_income_stmt
+    ttm_income_statement = quarterly_income_statement[quarterly_income_statement.columns[:4]].T.fillna(0)
+    last_balance_sheet = snapshot.quarterly_balance_sheet
+    last_balance_sheet = last_balance_sheet[last_balance_sheet.columns[:4]].T.ffill().bfill()
+    info = snapshot.info or {}
+
+    symbol = info.get("symbol") or snapshot.ticker
     yahoo_profile = build_yahoo_profile(symbol, info)
-    try:
-        yahoo_overview = build_yahoo_overview(ticker, info)
-    except Exception as e:
-        logger.debug("%s overview skipped: %s", ticker.ticker, e)
-        yahoo_overview = None
     name = info.get("longName") or info.get("shortName") or symbol
     curr_currency = info.get("financialCurrency")
     fx_rate = 1
@@ -423,5 +411,5 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
             },
         },
         "yahoo_profile": yahoo_profile,
-        "yahoo_overview": yahoo_overview,
+        "yahoo_overview": None,
     }

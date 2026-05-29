@@ -4,6 +4,7 @@ import yfinance as yf
 
 from scrape.core.config import CURRENCIES, REQUEST_TIMEOUT_SECONDS, headers
 from scrape.core.http_utils import request_get
+from scrape.core.rate_limit import yahoo_call
 from scrape.valuation.string_mapper import StringMapper
 
 logger = logging.getLogger(__name__)
@@ -15,7 +16,7 @@ def get_exchange_rates():
         if currency == "USD":
             fx_rate[currency] = 1.0
             continue
-        history = yf.Ticker(currency + "USD=X").history(period="5d")
+        history = yahoo_call(lambda symbol=currency + "USD=X": yf.Ticker(symbol).history(period="5d"))
         close = history.Close.dropna()
         if close.empty:
             logger.warning("Missing FX rate for %s via Yahoo Finance", currency + "USD=X")

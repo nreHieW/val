@@ -2,6 +2,8 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
+from scrape.core.rate_limit import yahoo_call
+
 
 def _clean_value(value):
     if value is None or pd.isna(value):
@@ -55,11 +57,11 @@ def _extract_earnings_estimates(df: pd.DataFrame):
 def build_yahoo_overview(yf_ticker, info: dict):
     symbol = info.get("symbol") or yf_ticker.ticker
     current_price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
-    analyst_targets = yf_ticker.get_analyst_price_targets()
-    earnings_estimates = _extract_earnings_estimates(yf_ticker.get_earnings_estimate())
-    recommendations = _extract_recommendation_mix(yf_ticker.get_recommendations_summary())
-    major_holders = _dict_from_dataframe(yf_ticker.get_major_holders())
-    insider_roster = _records_from_dataframe(yf_ticker.get_insider_roster_holders(), limit=10)
+    analyst_targets = yahoo_call(lambda: yf_ticker.get_analyst_price_targets())
+    earnings_estimates = _extract_earnings_estimates(yahoo_call(lambda: yf_ticker.get_earnings_estimate()))
+    recommendations = _extract_recommendation_mix(yahoo_call(lambda: yf_ticker.get_recommendations_summary()))
+    major_holders = _dict_from_dataframe(yahoo_call(lambda: yf_ticker.get_major_holders()))
+    insider_roster = _records_from_dataframe(yahoo_call(lambda: yf_ticker.get_insider_roster_holders()), limit=10)
     target_mean = analyst_targets.get("mean")
     target_median = analyst_targets.get("median")
     target_reference = target_median or target_mean

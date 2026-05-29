@@ -9,6 +9,7 @@ import yfinance as yf
 from yfinance.exceptions import YFRateLimitError
 
 from scrape.core.config import YAHOO_INFO_MAX_WORKERS, YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS
+from scrape.core.rate_limit import yahoo_call
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,7 @@ def _retry_sleep(attempt: int):
 
 @lru_cache(maxsize=10000)
 def get_yahoo_info(ticker):
-    return yf.Ticker(ticker).get_info()
+    return yahoo_call(lambda: yf.Ticker(ticker).get_info())
 
 
 def build_yahoo_profile(ticker, ticker_info):
@@ -84,12 +85,16 @@ def compute_ebitda(statement: pd.DataFrame, start=0, count=4):
     return ebit + depreciation
 
 
-def get_ttm_financials(ticker):
+def get_ttm_financials(ticker, yahoo_snapshot=None):
     for attempt in range(YAHOO_INFO_RETRIES):
         try:
-            yf_ticker = yf.Ticker(ticker)
-            quarterly_income_stmt = normalize_quarterly_statement(yf_ticker.quarterly_income_stmt)
-            quarterly_cashflow = normalize_quarterly_statement(yf_ticker.quarterly_cashflow)
+            if yahoo_snapshot is not None:
+                quarterly_income_stmt = yahoo_snapshot.quarterly_income_stmt
+                quarterly_cashflow = yahoo_snapshot.quarterly_cashflow
+            else:
+                yf_ticker = yf.Ticker(ticker)
+                quarterly_income_stmt = normalize_quarterly_statement(yahoo_call(lambda: yf_ticker.quarterly_income_stmt))
+                quarterly_cashflow = normalize_quarterly_statement(yahoo_call(lambda: yf_ticker.quarterly_cashflow))
             if quarterly_income_stmt.empty:
                 return None
 
@@ -151,12 +156,13 @@ def get_ttm_financials(ticker):
             return None
 
 
-def compute_ttm_financials(tickers):
+def compute_ttm_financials(tickers, yahoo_snapshots=None):
+    yahoo_snapshots = yahoo_snapshots or {}
     ttm_financials_by_ticker = {}
     for i in range(0, len(tickers), YAHOO_INFO_MAX_WORKERS):
         batch = tickers[i : i + YAHOO_INFO_MAX_WORKERS]
         with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_INFO_MAX_WORKERS) as executor:
-            results = list(executor.map(get_ttm_financials, batch))
+            results = list(executor.map(lambda ticker: get_ttm_financials(ticker, yahoo_snapshots.get(ticker)), batch))
         for result in results:
             if result:
                 ttm_financials_by_ticker[result["Ticker"]] = result
@@ -191,14 +197,19 @@ def get_info(ticker):
             return None
 
 
-def get_and_parse_yahoo(tickers, cached_profiles=None):
+def get_and_parse_yahoo(tickers, cached_profiles=None, yahoo_snapshots=None):
     cached_profiles = cached_profiles or {}
+    yahoo_snapshots = yahoo_snapshots or {}
     profiles_by_ticker = {}
 
     for ticker in tickers:
         cached_profile = cached_profiles.get(ticker)
         if cached_profile:
             profiles_by_ticker[ticker] = cached_profile
+            continue
+        snapshot = yahoo_snapshots.get(ticker)
+        if snapshot and snapshot.info:
+            profiles_by_ticker[ticker] = build_yahoo_profile(snapshot.info.get("symbol", ticker), snapshot.info)
 
     missing_tickers = [ticker for ticker in tickers if ticker not in profiles_by_ticker]
     if missing_tickers:

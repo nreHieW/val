@@ -5,7 +5,6 @@ import os
 import time
 import traceback
 import pandas as pd
-import yfinance as yf
 from pymongo import UpdateOne
 from yfinance.exceptions import YFRateLimitError
 
@@ -17,7 +16,8 @@ from scrape.core.tickers import get_all_tickers
 from scrape.sources.finviz import parse_finviz
 from scrape.sources.yahoo_market_discovery import get_sector_industries, get_similar_companies
 from scrape.sources.yahoo_overview import build_yahoo_overview
-from scrape.sources.yahoo_profiles import build_yahoo_profile, compute_ttm_financials, get_and_parse_yahoo, get_yahoo_info
+from scrape.sources.yahoo_profiles import compute_ttm_financials, get_and_parse_yahoo
+from scrape.sources.yahoo_snapshot import get_yahoo_snapshots
 from scrape.valuation.dcf_inputs import get_dcf_inputs
 from scrape.valuation.market_metrics import (
     get_10year_tbill,
@@ -33,7 +33,7 @@ logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 logger = logging.getLogger(__name__)
 
 
-def run_dcf_scrape(tickers, client):
+def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
     logger.info(f"Running DCF scrape for {len(tickers)} tickers")
     country_erps = get_country_erp()
     region_mapper = StringMapper(list(country_erps.keys()))
@@ -48,6 +48,7 @@ def run_dcf_scrape(tickers, client):
     dcf_db = client[db_name]["dcf_inputs"]
     overview_db = client[db_name]["ticker_overviews"]
     failure_counts = {}
+    yahoo_snapshots = yahoo_snapshots or {}
     yahoo_profiles = {}
     yahoo_overviews = {}
 
@@ -56,7 +57,7 @@ def run_dcf_scrape(tickers, client):
             logger.info(f"Processing batch {i // MAX_WORKERS + 1} of {len(tickers) // MAX_WORKERS + 1}")
             batch = tickers[i : i + MAX_WORKERS]
             futures = [
-                executor.submit(process_ticker, ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, dcf_db, fx_rates)
+                executor.submit(process_ticker, ticker, yahoo_snapshots.get(ticker), country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, dcf_db, fx_rates)
                 for ticker in batch
             ]
 
@@ -93,6 +94,16 @@ def run_dcf_scrape(tickers, client):
         },
         upsert=True,
     )
+    for ticker, snapshot in yahoo_snapshots.items():
+        if ticker not in yahoo_profiles:
+            continue
+        try:
+            overview = build_yahoo_overview(snapshot.yf_ticker, snapshot.info)
+            if overview:
+                yahoo_overviews[overview["Ticker"]] = overview
+        except Exception as e:
+            logger.debug("Yahoo overview skipped for %s: %s", ticker, e)
+
     overview_records = json.loads(json.dumps(list(yahoo_overviews.values()), cls=CustomEncoder))
     if overview_records:
         overview_db.bulk_write(
@@ -136,9 +147,9 @@ def run_market_discovery_scrape(tickers, client):
     logger.info("Industry records saved: %s", len(industry_records))
 
 
-def run_comps_scrape(tickers, client, cached_yahoo_profiles=None):
-    yahoo_df = get_and_parse_yahoo(tickers, cached_profiles=cached_yahoo_profiles)
-    ttm_financials_df = compute_ttm_financials(tickers)
+def run_comps_scrape(tickers, client, cached_yahoo_profiles=None, yahoo_snapshots=None):
+    yahoo_df = get_and_parse_yahoo(tickers, cached_profiles=cached_yahoo_profiles, yahoo_snapshots=yahoo_snapshots)
+    ttm_financials_df = compute_ttm_financials(tickers, yahoo_snapshots=yahoo_snapshots)
     finviz_df = parse_finviz(tickers)
 
     combined = pd.concat([yahoo_df, ttm_financials_df, finviz_df], axis=1, join="outer")
@@ -160,9 +171,10 @@ def main():
     tickers = get_all_tickers()[:1000]
     logger.info("Tickers loaded: %s", len(tickers))
     client = get_mongo_client()
-    yahoo_profiles = run_dcf_scrape(tickers, client)
+    yahoo_snapshots = get_yahoo_snapshots(tickers)
+    yahoo_profiles = run_dcf_scrape(tickers, client, yahoo_snapshots=yahoo_snapshots)
     logger.info("Running comps scrape")
-    run_comps_scrape(tickers, client, cached_yahoo_profiles=yahoo_profiles)
+    run_comps_scrape(tickers, client, cached_yahoo_profiles=yahoo_profiles, yahoo_snapshots=yahoo_snapshots)
     run_market_discovery_scrape(tickers, client)
 
 
@@ -174,12 +186,14 @@ def _exception_location(exc: Exception) -> str:
     return f"{type(exc).__name__} at {os.path.relpath(frame.filename)}:{frame.lineno} in {frame.name}"
 
 
-def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, db, fx_rates):
+def process_ticker(ticker, yahoo_snapshot, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, db, fx_rates):
+    if yahoo_snapshot is None:
+        return False, None, None, "missing_yahoo_snapshot"
     try:
         dcf_result = run_with_timeout(
             get_dcf_inputs,
             TICKER_TIMEOUT_SECONDS,
-            ticker,
+            yahoo_snapshot,
             country_erps,
             region_mapper,
             avg_metrics,
@@ -199,18 +213,7 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
     except Exception as e:
         failure_reason = _exception_location(e)
         logger.debug("DCF scrape failed for %s\n%s", ticker, "".join(traceback.format_exception(type(e), e, e.__traceback__)))
-        try:
-            yf_ticker = yf.Ticker(ticker)
-            info = get_yahoo_info(ticker)
-            yahoo_profile = build_yahoo_profile(info.get("symbol", ticker), info)
-            try:
-                yahoo_overview = build_yahoo_overview(yf_ticker, info)
-            except Exception:
-                yahoo_overview = None
-            return False, yahoo_profile, yahoo_overview, failure_reason
-        except Exception:
-            logger.debug("Yahoo fallback failed for %s\n%s", ticker, traceback.format_exc())
-            return False, None, None, failure_reason
+        return False, None, None, failure_reason
 
 
 if __name__ == "__main__":

@@ -10,8 +10,28 @@ from curl_cffi import requests as curl_requests
 from scrape.core.config import MAX_WORKERS, REQUEST_TIMEOUT_SECONDS, headers
 
 
+_SESSION_LOCAL = threading.local()
+
+
+def _requests_session():
+    session = getattr(_SESSION_LOCAL, "requests_session", None)
+    if session is None:
+        session = requests.Session()
+        session.headers.update(headers)
+        _SESSION_LOCAL.requests_session = session
+    return session
+
+
+def _browser_session():
+    session = getattr(_SESSION_LOCAL, "browser_session", None)
+    if session is None:
+        session = curl_requests.Session()
+        _SESSION_LOCAL.browser_session = session
+    return session
+
+
 def setup_proxies():
-    response = requests.get(
+    response = _requests_session().get(
         "https://www.sslproxies.org/",
         headers={
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.142 Safari/537.36"
@@ -48,7 +68,7 @@ def browser_get(url, **kwargs):
     Use this for sites that reject plain requests with bot-protection 403s.
     """
     request_headers = kwargs.pop("headers", headers)
-    return curl_requests.get(
+    return _browser_session().get(
         url,
         headers=request_headers,
         impersonate=kwargs.pop("impersonate", "chrome124"),
@@ -64,7 +84,7 @@ def fetch_html(url, retries=2, sleep_seconds=10, use_proxy=False, browser=False)
             proxies = get_proxy() if use_proxy else None
             if browser:
                 return browser_get(url, proxies=proxies).text
-            return requests.get(url, headers=headers, proxies=proxies, timeout=REQUEST_TIMEOUT_SECONDS).text
+            return _requests_session().get(url, proxies=proxies, timeout=REQUEST_TIMEOUT_SECONDS).text
         except Exception as e:
             last_error = e
             if attempt < retries - 1:

@@ -239,26 +239,30 @@ def r_and_d_handler(income_statement: pd.DataFrame, industry: str):
     return expenses
 
 
-def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper, avg_metrics: dict, industry_mapper: StringMapper, mature_erp: float, risk_free_rate: float, fx_rates: dict):
+def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper, avg_metrics: dict, industry_mapper: StringMapper, mature_erp: float, risk_free_rate: float, fx_rates: dict, yahoo_snapshot=None, marketscreener_executor=None):
     # Defaults
     average_maturity = 5
     marginal_tax_rate = 0.21
     value_of_options = 0
 
-    ticker = yf.Ticker(ticker)
-    quarterly_income_statement, _ = _income_statement_for_dcf(ticker)
+    ticker = yahoo_snapshot.yf_ticker if yahoo_snapshot else yf.Ticker(ticker)
+    quarterly_income_statement = yahoo_snapshot.quarterly_income_stmt if yahoo_snapshot is not None else pd.DataFrame()
+    if quarterly_income_statement.empty:
+        quarterly_income_statement, _ = _income_statement_for_dcf(ticker)
     ttm_columns = list(quarterly_income_statement.columns[:4])
     ttm_income_statement = quarterly_income_statement.loc[:, ttm_columns].T.fillna(0)
-    last_balance_sheet = _with_yahoo_retries(
-        ticker.ticker + " quarterly_balance_sheet",
-        lambda: ticker.quarterly_balance_sheet,
-        financial_endpoint=True,
-    )
+    last_balance_sheet = yahoo_snapshot.quarterly_balance_sheet if yahoo_snapshot is not None else pd.DataFrame()
+    if last_balance_sheet.empty:
+        last_balance_sheet = _with_yahoo_retries(
+            ticker.ticker + " quarterly_balance_sheet",
+            lambda: ticker.quarterly_balance_sheet,
+            financial_endpoint=True,
+        )
     if last_balance_sheet.empty:
         raise MissingFinancialStatements(f"empty_quarterly_balance_sheet:{ticker.ticker}")
     else:
         last_balance_sheet = last_balance_sheet[last_balance_sheet.columns[:4]].T.ffill().bfill()
-    info = _with_yahoo_retries(ticker.ticker + " info", lambda: ticker.get_info() or {})
+    info = yahoo_snapshot.info if yahoo_snapshot is not None and yahoo_snapshot.info else _with_yahoo_retries(ticker.ticker + " info", lambda: ticker.get_info() or {})
 
     symbol = info.get("symbol") or ticker.ticker
     yahoo_profile = build_yahoo_profile(symbol, info)
@@ -325,7 +329,9 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     unlevered_beta, industry = get_industry_beta(industry, sector, industry_mapper, avg_betas)
     marketscreener_url = get_marketscreener_url(symbol, info.get("shortName") or info.get("longName") or "")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+    executor = marketscreener_executor or concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    should_shutdown_executor = marketscreener_executor is None
+    try:
         regional_revenues_future = executor.submit(get_revenue_by_region, symbol, marketscreener_url)
         forecast_defaults_future = executor.submit(get_revenue_forecasts, marketscreener_url)
 
@@ -339,6 +345,9 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
         except Exception as e:
             logger.debug("%s revenue forecasts unavailable; using defaults: %s", symbol, e)
             forecast_defaults = {}
+    finally:
+        if should_shutdown_executor:
+            executor.shutdown()
 
     equity_risk_premium, mapped_regional_revenues = get_regional_crps(regional_revenues, region_mapper, country_erps)
     equity_risk_premium = equity_risk_premium + mature_erp
@@ -429,11 +438,13 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     sales_to_capital_ratio_early = curr_sales_to_capital_ratio
     sales_to_capital_ratio_steady = avg_metrics["Sales/Capital"].get(industry, 1)
     try:
-        annual_income_stmt = _with_yahoo_retries(
-            ticker.ticker + " income_stmt",
-            lambda: ticker.income_stmt,
-            financial_endpoint=True,
-        )
+        annual_income_stmt = yahoo_snapshot.income_stmt if yahoo_snapshot is not None else pd.DataFrame()
+        if annual_income_stmt.empty:
+            annual_income_stmt = _with_yahoo_retries(
+                ticker.ticker + " income_stmt",
+                lambda: ticker.income_stmt,
+                financial_endpoint=True,
+            )
         r_and_d_expenses = r_and_d_handler(annual_income_stmt, industry)
     except Exception as e:
         logger.debug("%s R&D expense unavailable; using empty history: %s", symbol, e)

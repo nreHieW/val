@@ -14,15 +14,40 @@ from scrape.core.config import JSON_LOCK, MAX_WORKERS
 from scrape.core.http_utils import browser_get, get_htmls
 
 logger = logging.getLogger(__name__)
+_MARKETSCREENER_CACHE_FILE = "marketscreener_links.json"
+_MARKETSCREENER_CACHE = {}
+_MARKETSCREENER_CACHE_LOADED = False
+_MARKETSCREENER_CACHE_DIRTY = False
+
+
+def load_marketscreener_cache():
+    global _MARKETSCREENER_CACHE, _MARKETSCREENER_CACHE_LOADED
+    with JSON_LOCK:
+        if _MARKETSCREENER_CACHE_LOADED:
+            return
+        if os.path.exists(_MARKETSCREENER_CACHE_FILE):
+            with open(_MARKETSCREENER_CACHE_FILE, "r") as f:
+                _MARKETSCREENER_CACHE = json.load(f)
+        _MARKETSCREENER_CACHE_LOADED = True
+
+
+def save_marketscreener_cache():
+    global _MARKETSCREENER_CACHE_DIRTY
+    with JSON_LOCK:
+        if not _MARKETSCREENER_CACHE_DIRTY:
+            return
+        with open(_MARKETSCREENER_CACHE_FILE, "w") as f:
+            json.dump(_MARKETSCREENER_CACHE, f)
+        _MARKETSCREENER_CACHE_DIRTY = False
 
 
 def get_marketscreener_url(ticker, name: str = ""):
+    global _MARKETSCREENER_CACHE_DIRTY
+    load_marketscreener_cache()
     with JSON_LOCK:
-        if os.path.exists("marketscreener_links.json"):
-            with open("marketscreener_links.json", "r") as f:
-                cached_link = json.load(f).get(ticker)
-            if cached_link:
-                return cached_link
+        cached_link = _MARKETSCREENER_CACHE.get(ticker)
+    if cached_link:
+        return cached_link
 
     search_url = "https://www.marketscreener.com/search/?q=" + "+".join(ticker.split())
     page = browser_get(search_url)
@@ -55,15 +80,8 @@ def get_marketscreener_url(ticker, name: str = ""):
         logger.debug("Could not find %s on marketscreener", ticker)
     else:
         with JSON_LOCK:
-            if os.path.exists("marketscreener_links.json"):
-                with open("marketscreener_links.json", "r") as f:
-                    data = json.load(f)
-                data[ticker] = found_link
-            else:
-                data = {ticker: found_link}
-
-            with open("marketscreener_links.json", "w") as f:
-                json.dump(data, f)
+            _MARKETSCREENER_CACHE[ticker] = found_link
+            _MARKETSCREENER_CACHE_DIRTY = True
 
     return found_link
 
@@ -186,6 +204,7 @@ def get_marketscreener_links(tickers):
             except Exception:
                 continue
 
+    save_marketscreener_cache()
     return links
 
 

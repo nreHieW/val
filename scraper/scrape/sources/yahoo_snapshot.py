@@ -21,6 +21,7 @@ class YahooSnapshot:
     quarterly_income_stmt: pd.DataFrame
     quarterly_balance_sheet: pd.DataFrame
     quarterly_cashflow: pd.DataFrame
+    income_stmt: pd.DataFrame
 
     @property
     def symbol(self) -> str:
@@ -44,12 +45,11 @@ def get_yahoo_snapshot(ticker: str) -> YahooSnapshot | None:
         quarterly_income_stmt = normalize_quarterly_statement(
             _safe_statement(lambda: yf_ticker.quarterly_income_stmt, f"{ticker} quarterly income statement")
         )
-        quarterly_balance_sheet = normalize_quarterly_statement(
-            _safe_statement(lambda: yf_ticker.quarterly_balance_sheet, f"{ticker} quarterly balance sheet")
-        )
+        quarterly_balance_sheet = _safe_statement(lambda: yf_ticker.quarterly_balance_sheet, f"{ticker} quarterly balance sheet")
         quarterly_cashflow = normalize_quarterly_statement(
             _safe_statement(lambda: yf_ticker.quarterly_cashflow, f"{ticker} quarterly cashflow")
         )
+        income_stmt = _safe_statement(lambda: yf_ticker.income_stmt, f"{ticker} income statement")
     except YFRateLimitError:
         logger.debug("%s snapshot skipped: Yahoo rate limited", ticker)
         return None
@@ -64,6 +64,7 @@ def get_yahoo_snapshot(ticker: str) -> YahooSnapshot | None:
         quarterly_income_stmt=quarterly_income_stmt,
         quarterly_balance_sheet=quarterly_balance_sheet,
         quarterly_cashflow=quarterly_cashflow,
+        income_stmt=income_stmt,
     )
 
 

@@ -54,8 +54,8 @@ def _yahoo_call(label, fn, retry_none=False):
     return None
 
 
-def get_similar_companies(source):
-    info = _yahoo_call(f"{source} similar companies", lambda: get_yahoo_info(source))
+def get_similar_companies(source, yahoo_info=None):
+    info = yahoo_info or _yahoo_call(f"{source} similar companies", lambda: get_yahoo_info(source))
     if info is None:
         return None
     industry = info["industry"].replace(" - ", "—")

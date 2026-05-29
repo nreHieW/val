@@ -9,7 +9,13 @@ import pandas as pd
 import yfinance as yf
 from yfinance.exceptions import YFRateLimitError
 
-from scrape.core.config import YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS
+from scrape.core.config import (
+    YAHOO_FINANCIAL_JITTER_SECONDS,
+    YAHOO_FINANCIAL_MIN_INTERVAL_SECONDS,
+    YAHOO_INFO_RETRIES,
+    YAHOO_INFO_RETRY_SLEEP_SECONDS,
+)
+from scrape.core.rate_limit import RateLimiter
 from scrape.sources.marketscreener import get_marketscreener_url, get_revenue_by_region, get_revenue_forecasts
 from scrape.sources.yahoo_overview import build_yahoo_overview
 from scrape.sources.yahoo_profiles import build_yahoo_profile, normalize_quarterly_statement
@@ -23,6 +29,7 @@ from scrape.valuation.statements import (
 from scrape.valuation.string_mapper import StringMapper
 
 logger = logging.getLogger(__name__)
+_yahoo_financial_limiter = RateLimiter(YAHOO_FINANCIAL_MIN_INTERVAL_SECONDS, YAHOO_FINANCIAL_JITTER_SECONDS)
 
 
 class MissingFinancialStatements(ValueError):
@@ -46,9 +53,11 @@ def _is_transient_yahoo_error(exc):
     return any(token in message for token in ("rate limit", "too many requests", "crumb", "cookie", "timeout"))
 
 
-def _with_yahoo_retries(label, func):
+def _with_yahoo_retries(label, func, *, financial_endpoint: bool = False):
     for attempt in range(YAHOO_INFO_RETRIES):
         try:
+            if financial_endpoint:
+                _yahoo_financial_limiter.wait()
             return func()
         except Exception as exc:
             if attempt == YAHOO_INFO_RETRIES - 1 or not _is_transient_yahoo_error(exc):
@@ -66,12 +75,7 @@ def _balance_sheet_scalar(df: pd.DataFrame, key: str, default: float = 0) -> flo
 
 
 def _usd_fx_rate(currency: str | None, fx_rates: dict) -> float:
-    """Return the USD conversion rate for one unit of currency.
-
-    Missing FX data should not kill the entire DCF run. When Yahoo and the
-    supplied table both miss a rate, keep the scrape moving with a 1.0 fallback
-    and emit a warning that includes the Yahoo pair we attempted.
-    """
+    """Return the USD conversion rate for one unit of currency; fail if unavailable."""
     if not currency:
         return 1.0
 
@@ -83,44 +87,41 @@ def _usd_fx_rate(currency: str | None, fx_rates: dict) -> float:
     if resolved:
         return float(resolved)
 
-    # Yahoo sometimes reports London prices in pence (GBX/GBP=X). DCF
-    # financial statements are usually already in GBP, but handle pence if seen.
     if currency in {"GBX", "GBP=X"}:
         resolved = fx_rates.get("GBP")
         if resolved:
             return float(resolved) / 100
 
     yahoo_pair = f"{currency}USD=X"
-    try:
-        history = yf.Ticker(yahoo_pair).history(period="5d")
-        close = history.Close.dropna()
-        if not close.empty:
-            return float(close.iloc[-1].item())
-    except Exception as exc:
-        logger.warning("FX lookup failed for %s via %s: %s", currency, yahoo_pair, exc)
-        return 1.0
+    history = yf.Ticker(yahoo_pair).history(period="5d")
+    close = history.Close.dropna()
+    if not close.empty:
+        return float(close.iloc[-1].item())
 
-    logger.warning("Missing USD FX rate for %s via %s; using 1.0 fallback", currency, yahoo_pair)
-    return 1.0
+    raise ValueError(f"Missing USD FX rate for {currency} via {yahoo_pair}")
 
 
 def _income_statement_for_dcf(ticker: yf.Ticker) -> tuple[pd.DataFrame, bool]:
-    """Prefer quarterly income statement; fall back to annual when Yahoo has no quarterlies."""
-    quarterly = normalize_quarterly_statement(
-        _with_yahoo_retries(ticker.ticker + " quarterly_income_stmt", lambda: ticker.quarterly_income_stmt)
-    )
-    if not quarterly.empty:
-        return quarterly, False
+    """Return quarterly income statement only; fail loudly when Yahoo returns empty data."""
+    symbol = ticker.ticker
+    for attempt in range(YAHOO_INFO_RETRIES):
+        current_ticker = ticker if attempt == 0 else yf.Ticker(symbol)
+        quarterly = normalize_quarterly_statement(
+            _with_yahoo_retries(
+                symbol + " quarterly_income_stmt",
+                lambda: current_ticker.quarterly_income_stmt,
+                financial_endpoint=True,
+            )
+        )
+        if not quarterly.empty:
+            return quarterly, False
 
-    annual = normalize_quarterly_statement(
-        _with_yahoo_retries(ticker.ticker + " income_stmt", lambda: ticker.income_stmt)
-    )
-    if not annual.empty:
-        logger.warning("%s missing quarterly income statement; using latest annual periods for DCF inputs", ticker.ticker)
-        return annual, True
+        if attempt < YAHOO_INFO_RETRIES - 1:
+            sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1) + random.uniform(0, 0.75)
+            logger.debug("%s quarterly income statement empty; retrying in %.1fs", symbol, sleep_seconds)
+            time.sleep(sleep_seconds)
 
-    logger.info("%s missing both quarterly and annual income statements; skipping DCF inputs", ticker.ticker)
-    return pd.DataFrame(), False
+    raise MissingFinancialStatements(f"empty_quarterly_income_statement_after_retries:{symbol}")
 
 
 def r_and_d_handler(income_statement: pd.DataFrame, industry: str):
@@ -245,18 +246,16 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     value_of_options = 0
 
     ticker = yf.Ticker(ticker)
-    quarterly_income_statement, using_annual_income_statement = _income_statement_for_dcf(ticker)
-    if quarterly_income_statement.empty:
-        raise MissingFinancialStatements(f"missing_income_statement:{ticker.ticker}")
-    ttm_columns = list(quarterly_income_statement.columns[:1] if using_annual_income_statement else quarterly_income_statement.columns[:4])
+    quarterly_income_statement, _ = _income_statement_for_dcf(ticker)
+    ttm_columns = list(quarterly_income_statement.columns[:4])
     ttm_income_statement = quarterly_income_statement.loc[:, ttm_columns].T.fillna(0)
-    last_balance_sheet = _with_yahoo_retries(ticker.ticker + " quarterly_balance_sheet", lambda: ticker.quarterly_balance_sheet)
+    last_balance_sheet = _with_yahoo_retries(
+        ticker.ticker + " quarterly_balance_sheet",
+        lambda: ticker.quarterly_balance_sheet,
+        financial_endpoint=True,
+    )
     if last_balance_sheet.empty:
-        last_balance_sheet = _with_yahoo_retries(ticker.ticker + " balance_sheet", lambda: ticker.balance_sheet)
-        if not last_balance_sheet.empty:
-            logger.warning("%s missing quarterly balance sheet; using latest annual balance sheet", ticker.ticker)
-    if last_balance_sheet.empty:
-        last_balance_sheet = pd.DataFrame([{}])
+        raise MissingFinancialStatements(f"empty_quarterly_balance_sheet:{ticker.ticker}")
     else:
         last_balance_sheet = last_balance_sheet[last_balance_sheet.columns[:4]].T.ffill().bfill()
     info = _with_yahoo_retries(ticker.ticker + " info", lambda: ticker.get_info() or {})
@@ -430,7 +429,11 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     sales_to_capital_ratio_early = curr_sales_to_capital_ratio
     sales_to_capital_ratio_steady = avg_metrics["Sales/Capital"].get(industry, 1)
     try:
-        annual_income_stmt = _with_yahoo_retries(ticker.ticker + " income_stmt", lambda: ticker.income_stmt)
+        annual_income_stmt = _with_yahoo_retries(
+            ticker.ticker + " income_stmt",
+            lambda: ticker.income_stmt,
+            financial_endpoint=True,
+        )
         r_and_d_expenses = r_and_d_handler(annual_income_stmt, industry)
     except Exception as e:
         logger.debug("%s R&D expense unavailable; using empty history: %s", symbol, e)

@@ -168,7 +168,7 @@ def run_comps_scrape(tickers, client, cached_yahoo_profiles=None, yahoo_snapshot
 
 
 def main():
-    tickers = get_all_tickers()[:1000]
+    tickers = get_all_tickers()
     logger.info("Tickers loaded: %s", len(tickers))
     client = get_mongo_client()
     yahoo_snapshots = get_yahoo_snapshots(tickers)

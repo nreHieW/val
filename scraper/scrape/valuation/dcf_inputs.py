@@ -241,7 +241,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     )
     minority_interest = _balance_sheet_scalar(last_balance_sheet, "Minority Interest")  # by right. should convert to market value
     number_of_shares_outstanding = info.get("sharesOutstanding", 0)
-    curr_price = info.get("previousClose", 0)
+    curr_price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
     pretax_income_total = pretax_income_series.sum()
     effective_tax_rate = (tax_rate_series * pretax_income_series).sum() / pretax_income_total if pretax_income_total else 0
 

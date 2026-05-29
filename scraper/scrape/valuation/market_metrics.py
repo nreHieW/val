@@ -1,9 +1,12 @@
+import logging
 import pandas as pd
 import yfinance as yf
 
 from scrape.core.config import CURRENCIES, REQUEST_TIMEOUT_SECONDS, headers
 from scrape.core.http_utils import request_get
 from scrape.valuation.string_mapper import StringMapper
+
+logger = logging.getLogger(__name__)
 
 
 def get_exchange_rates():
@@ -14,7 +17,11 @@ def get_exchange_rates():
             continue
         history = yf.Ticker(currency + "USD=X").history(period="5d")
         close = history.Close.dropna()
-        fx_rate[currency] = close.iloc[-1].item() if not close.empty else 1.0
+        if close.empty:
+            logger.warning("Missing FX rate for %s via Yahoo Finance", currency + "USD=X")
+            fx_rate[currency] = 1.0
+        else:
+            fx_rate[currency] = close.iloc[-1].item()
     return fx_rate
 
 

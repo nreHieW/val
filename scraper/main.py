@@ -51,7 +51,6 @@ def run_dcf_scrape(tickers, client):
     yahoo_profiles = {}
     yahoo_overviews = {}
 
-    consecutive_rate_limited_batches = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         for i in range(0, len(tickers), MAX_WORKERS):
             logger.info(f"Processing batch {i // MAX_WORKERS + 1} of {len(tickers) // MAX_WORKERS + 1}")
@@ -60,7 +59,6 @@ def run_dcf_scrape(tickers, client):
                 executor.submit(process_ticker, ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, dcf_db, fx_rates)
                 for ticker in batch
             ]
-            batch_failure_counts = {}
 
             for future in concurrent.futures.as_completed(futures):
                 success, yahoo_profile, yahoo_overview, failure_reason = future.result()
@@ -70,19 +68,7 @@ def run_dcf_scrape(tickers, client):
                     yahoo_overviews[yahoo_overview["Ticker"]] = yahoo_overview
                 if not success:
                     failure_counts[failure_reason] = failure_counts.get(failure_reason, 0) + 1
-                    batch_failure_counts[failure_reason] = batch_failure_counts.get(failure_reason, 0) + 1
                     continue
-
-            if batch_failure_counts.get("yahoo_rate_limit") == len(batch):
-                consecutive_rate_limited_batches += 1
-                if consecutive_rate_limited_batches >= 3:
-                    remaining = len(tickers) - i - len(batch)
-                    if remaining > 0:
-                        failure_counts["skipped_after_rate_limit"] = remaining
-                    logger.warning("Stopping DCF scrape early after repeated Yahoo rate-limited batches")
-                    break
-            else:
-                consecutive_rate_limited_batches = 0
 
             if i + MAX_WORKERS < len(tickers):
                 time.sleep(1)
@@ -171,7 +157,7 @@ def run_comps_scrape(tickers, client, cached_yahoo_profiles=None):
 
 
 def main():
-    tickers = get_all_tickers()
+    tickers = get_all_tickers()[:1000]
     logger.info("Tickers loaded: %s", len(tickers))
     client = get_mongo_client()
     yahoo_profiles = run_dcf_scrape(tickers, client)

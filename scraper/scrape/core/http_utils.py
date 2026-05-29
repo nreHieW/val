@@ -8,9 +8,19 @@ from bs4 import BeautifulSoup
 
 from scrape.core.config import MAX_WORKERS, REQUEST_TIMEOUT_SECONDS, headers
 
+_THREAD_LOCAL = threading.local()
+
+
+def request_get(url, **kwargs):
+    session = getattr(_THREAD_LOCAL, "session", None)
+    if session is None:
+        session = requests.Session()
+        _THREAD_LOCAL.session = session
+    return session.get(url, **kwargs)
+
 
 def setup_proxies():
-    response = requests.get(
+    response = request_get(
         "https://www.sslproxies.org/",
         headers={
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.142 Safari/537.36"
@@ -46,7 +56,7 @@ def fetch_html(url, retries=2, sleep_seconds=10, use_proxy=False):
     for attempt in range(retries):
         try:
             proxies = get_proxy() if use_proxy else None
-            return requests.get(url, headers=headers, proxies=proxies, timeout=REQUEST_TIMEOUT_SECONDS).text
+            return request_get(url, headers=headers, proxies=proxies, timeout=REQUEST_TIMEOUT_SECONDS).text
         except Exception as e:
             last_error = e
             if attempt < retries - 1:

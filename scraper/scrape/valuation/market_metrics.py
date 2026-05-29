@@ -1,8 +1,8 @@
 import pandas as pd
-import requests
 import yfinance as yf
 
 from scrape.core.config import CURRENCIES, REQUEST_TIMEOUT_SECONDS, headers
+from scrape.core.http_utils import request_get
 from scrape.valuation.string_mapper import StringMapper
 
 
@@ -58,7 +58,7 @@ def get_industry_beta(industry: str, sector: str, mapper: StringMapper, industry
 
 def get_10year_tbill():
     url = "https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol?symbols=US10Y&requestMethod=itv&noform=1&partnerId=2&fund=1&exthrs=1&output=json&events=1"
-    res = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS).json()
+    res = request_get(url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS).json()
     raw = res["FormattedQuoteResult"]["FormattedQuote"][0]["last"]
     res = raw.replace("%", "")
     return float(res) / 100

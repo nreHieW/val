@@ -5,15 +5,15 @@ import time
 
 import numpy as np
 import pandas as pd
-import requests
 import yfinance as yf
 from bs4 import BeautifulSoup
 from yfinance.exceptions import YFRateLimitError
 
 from scrape.core.config import REQUEST_TIMEOUT_SECONDS, YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS, headers
+from scrape.core.http_utils import request_get
 from scrape.sources.marketscreener import get_marketscreener_url, get_revenue_by_region, get_revenue_forecasts
 from scrape.sources.yahoo_overview import build_yahoo_overview
-from scrape.sources.yahoo_profiles import build_yahoo_profile, normalize_quarterly_statement
+from scrape.sources.yahoo_profiles import build_yahoo_profile, get_yahoo_info, normalize_quarterly_statement
 from scrape.valuation.market_metrics import get_industry_beta, get_regional_crps, synthetic_rating
 from scrape.valuation.statements import (
     bridge_fiscal_year_values,
@@ -35,7 +35,7 @@ def _balance_sheet_scalar(df: pd.DataFrame, key: str, default: float = 0) -> flo
 
 def get_similar_stocks(ticker: str):
     url = f"https://www.tipranks.com/stocks/{ticker.lower()}/similar-stocks"
-    response = requests.get(
+    response = request_get(
         url,
         headers=headers,
         timeout=REQUEST_TIMEOUT_SECONDS,
@@ -47,7 +47,7 @@ def get_similar_stocks(ticker: str):
 
 def r_and_d_handler(ticker, industry):
     url = f"https://ycharts.com/companies/{ticker.upper()}/r_and_d_expense_ttm"
-    response = requests.get(
+    response = request_get(
         url,
         headers={"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.142 Safari/537.36"},
         timeout=REQUEST_TIMEOUT_SECONDS,
@@ -178,7 +178,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     info = {}
     for attempt in range(YAHOO_INFO_RETRIES):
         try:
-            info = ticker.get_info() or {}
+            info = get_yahoo_info(ticker.ticker) or {}
             break
         except YFRateLimitError:
             if attempt == YAHOO_INFO_RETRIES - 1:

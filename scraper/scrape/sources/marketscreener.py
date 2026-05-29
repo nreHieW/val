@@ -8,25 +8,35 @@ from io import StringIO
 
 import numpy as np
 import pandas as pd
-import requests
 from bs4 import BeautifulSoup
 
 from scrape.core.config import JSON_LOCK, MAX_WORKERS, REQUEST_TIMEOUT_SECONDS, headers
-from scrape.core.http_utils import get_htmls
+from scrape.core.http_utils import get_htmls, request_get
 
 logger = logging.getLogger(__name__)
+
+_MARKETSCREENER_LINKS_CACHE = None
+
+
+def _load_marketscreener_links():
+    global _MARKETSCREENER_LINKS_CACHE
+    if _MARKETSCREENER_LINKS_CACHE is None:
+        if os.path.exists("marketscreener_links.json"):
+            with open("marketscreener_links.json", "r") as f:
+                _MARKETSCREENER_LINKS_CACHE = json.load(f)
+        else:
+            _MARKETSCREENER_LINKS_CACHE = {}
+    return _MARKETSCREENER_LINKS_CACHE
 
 
 def get_marketscreener_url(ticker, name: str = ""):
     with JSON_LOCK:
-        if os.path.exists("marketscreener_links.json"):
-            with open("marketscreener_links.json", "r") as f:
-                cached_link = json.load(f).get(ticker)
-            if cached_link:
-                return cached_link
+        cached_link = _load_marketscreener_links().get(ticker)
+        if cached_link:
+            return cached_link
 
     search_url = "https://www.marketscreener.com/search/?q=" + "+".join(ticker.split())
-    page = requests.get(search_url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+    page = request_get(search_url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
     soup = BeautifulSoup(page.content, "lxml")
     rows = soup.find_all("tr")
     found_link = None
@@ -41,7 +51,7 @@ def get_marketscreener_url(ticker, name: str = ""):
 
     if not found_link and name:
         search_url = "https://www.marketscreener.com/search/?q=" + "+".join(name.split())
-        page = requests.get(search_url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+        page = request_get(search_url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
         soup = BeautifulSoup(page.content, "lxml")
         rows = soup.find_all("tr")
         for row in rows:
@@ -56,13 +66,8 @@ def get_marketscreener_url(ticker, name: str = ""):
         logger.debug("Could not find %s on marketscreener", ticker)
     else:
         with JSON_LOCK:
-            if os.path.exists("marketscreener_links.json"):
-                with open("marketscreener_links.json", "r") as f:
-                    data = json.load(f)
-                data[ticker] = found_link
-            else:
-                data = {ticker: found_link}
-
+            data = _load_marketscreener_links()
+            data[ticker] = found_link
             with open("marketscreener_links.json", "w") as f:
                 json.dump(data, f)
 
@@ -72,7 +77,7 @@ def get_marketscreener_url(ticker, name: str = ""):
 def get_revenue_by_region(ticker, url):
     if not url:
         raise ValueError(f"No MarketScreener URL for {ticker}")
-    page = requests.get(url + "company/", headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+    page = request_get(url + "company/", headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
     soup = BeautifulSoup(page.content, "lxml")
     df = None
     for div in soup.find_all("div", {"class": "card mb-15 card--collapsible card--scrollable"}):
@@ -93,7 +98,7 @@ def get_revenue_by_region(ticker, url):
 
 
 def get_revenue_forecasts(url):
-    page = requests.get(url + "finances/", headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+    page = request_get(url + "finances/", headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
     soup = BeautifulSoup(page.content, features="lxml")
     for div in soup.find_all("div", {"class": "card card--collapsible mb-15"}):
         header = div.find("div", {"class": "card-header"})

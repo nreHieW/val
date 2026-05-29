@@ -6,6 +6,7 @@ import time
 import traceback
 import pandas as pd
 import yfinance as yf
+from pymongo import UpdateOne
 from yfinance.exceptions import YFRateLimitError
 
 from scrape.core.config import MAX_WORKERS, TICKER_TIMEOUT_SECONDS
@@ -16,7 +17,7 @@ from scrape.core.tickers import get_all_tickers
 from scrape.sources.finviz import parse_finviz
 from scrape.sources.yahoo_market_discovery import get_sector_industries, get_similar_companies
 from scrape.sources.yahoo_overview import build_yahoo_overview
-from scrape.sources.yahoo_profiles import build_yahoo_profile, compute_ttm_financials, get_and_parse_yahoo
+from scrape.sources.yahoo_profiles import build_yahoo_profile, compute_ttm_financials, get_and_parse_yahoo, get_yahoo_info
 from scrape.valuation.dcf_inputs import get_dcf_inputs
 from scrape.valuation.market_metrics import (
     get_10year_tbill,
@@ -107,8 +108,10 @@ def run_dcf_scrape(tickers, client):
         upsert=True,
     )
     overview_records = json.loads(json.dumps(list(yahoo_overviews.values()), cls=CustomEncoder))
-    for record in overview_records:
-        overview_db.update_one({"Ticker": record["Ticker"]}, {"$set": record}, upsert=True)
+    if overview_records:
+        overview_db.bulk_write(
+            [UpdateOne({"Ticker": record["Ticker"]}, {"$set": record}, upsert=True) for record in overview_records]
+        )
     logger.info("Yahoo overviews saved: %s out of %s tickers", len(overview_records), len(tickers))
 
     return yahoo_profiles
@@ -140,8 +143,10 @@ def run_market_discovery_scrape(tickers, client):
     logger.info("Running sector industry scrape")
     industries = get_sector_industries()
     industry_records = json.loads(json.dumps(industries, cls=CustomEncoder))
-    for record in industry_records:
-        industries_db.update_one({"industry_key": record["industry_key"]}, {"$set": record}, upsert=True)
+    if industry_records:
+        industries_db.bulk_write(
+            [UpdateOne({"industry_key": record["industry_key"]}, {"$set": record}, upsert=True) for record in industry_records]
+        )
     logger.info("Industry records saved: %s", len(industry_records))
 
 
@@ -159,8 +164,10 @@ def run_comps_scrape(tickers, client, cached_yahoo_profiles=None):
     db = client[os.getenv("MONGODB_DB_NAME")]["financials"]
     data = combined.to_dict(orient="records")
     data = json.loads(json.dumps(data, cls=CustomEncoder))
-    for record in data:
-        db.update_one({"Ticker": record["Ticker"]}, {"$set": record}, upsert=True)
+    if data:
+        db.bulk_write(
+            [UpdateOne({"Ticker": record["Ticker"]}, {"$set": record}, upsert=True) for record in data]
+        )
 
 
 def main():
@@ -208,7 +215,7 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
         logger.debug("DCF scrape failed for %s\n%s", ticker, "".join(traceback.format_exception(type(e), e, e.__traceback__)))
         try:
             yf_ticker = yf.Ticker(ticker)
-            info = yf_ticker.get_info()
+            info = get_yahoo_info(ticker)
             yahoo_profile = build_yahoo_profile(info.get("symbol", ticker), info)
             try:
                 yahoo_overview = build_yahoo_overview(yf_ticker, info)

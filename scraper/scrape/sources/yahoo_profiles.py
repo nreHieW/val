@@ -1,6 +1,8 @@
 import concurrent.futures
 import logging
+import random
 import time
+from functools import lru_cache
 
 import pandas as pd
 import yfinance as yf
@@ -9,6 +11,14 @@ from yfinance.exceptions import YFRateLimitError
 from scrape.core.config import YAHOO_INFO_MAX_WORKERS, YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS
 
 logger = logging.getLogger(__name__)
+
+def _retry_sleep(attempt: int):
+    time.sleep(YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1) + random.uniform(0, 1))
+
+
+@lru_cache(maxsize=10000)
+def get_yahoo_info(ticker):
+    return yf.Ticker(ticker).get_info()
 
 
 def build_yahoo_profile(ticker, ticker_info):
@@ -135,9 +145,7 @@ def get_ttm_financials(ticker):
                 logger.debug("%s TTM skipped: Yahoo rate limited after %s attempts", ticker, YAHOO_INFO_RETRIES)
                 return None
 
-            sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1)
-            # print(f"[WARN] Yahoo rate limited for {ticker} TTM; retrying in {sleep_seconds:.1f}s")
-            time.sleep(sleep_seconds)
+            _retry_sleep(attempt)
         except Exception as e:
             logger.debug("%s TTM skipped: %s", ticker, e)
             return None
@@ -170,16 +178,14 @@ def compute_ttm_financials(tickers):
 def get_info(ticker):
     for attempt in range(YAHOO_INFO_RETRIES):
         try:
-            ticker_info = yf.Ticker(ticker).get_info()
+            ticker_info = get_yahoo_info(ticker)
             return build_yahoo_profile(ticker, ticker_info)
         except YFRateLimitError:
             if attempt == YAHOO_INFO_RETRIES - 1:
                 logger.debug("%s profile skipped: Yahoo rate limited after %s attempts", ticker, YAHOO_INFO_RETRIES)
                 return None
 
-            sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1)
-            # print(f"[WARN] Yahoo rate limited for {ticker}; retrying in {sleep_seconds:.1f}s")
-            time.sleep(sleep_seconds)
+            _retry_sleep(attempt)
         except Exception as e:
             logger.debug("%s profile skipped: %s", ticker, e)
             return None

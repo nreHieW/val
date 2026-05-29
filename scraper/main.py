@@ -8,7 +8,7 @@ import pandas as pd
 import yfinance as yf
 from yfinance.exceptions import YFRateLimitError
 
-from scrape.core.config import MAX_WORKERS, TICKER_TIMEOUT_SECONDS
+from scrape.core.config import DCF_MAX_WORKERS, TICKER_TIMEOUT_SECONDS
 from scrape.core.http_utils import run_with_timeout
 from scrape.core.json_util import CustomEncoder
 from scrape.core.mongo import get_mongo_client
@@ -17,7 +17,7 @@ from scrape.sources.finviz import parse_finviz
 from scrape.sources.yahoo_market_discovery import get_sector_industries, get_similar_companies
 from scrape.sources.yahoo_overview import build_yahoo_overview
 from scrape.sources.yahoo_profiles import build_yahoo_profile, compute_ttm_financials, get_and_parse_yahoo
-from scrape.valuation.dcf_inputs import get_dcf_inputs
+from scrape.valuation.dcf_inputs import MissingFinancialStatements, get_dcf_inputs
 from scrape.valuation.market_metrics import (
     get_10year_tbill,
     get_country_erp,
@@ -47,14 +47,15 @@ def run_dcf_scrape(tickers, client):
     dcf_db = client[db_name]["dcf_inputs"]
     overview_db = client[db_name]["ticker_overviews"]
     failure_counts = {}
+    skipped_counts = {}
     yahoo_profiles = {}
     yahoo_overviews = {}
 
     consecutive_rate_limited_batches = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        for i in range(0, len(tickers), MAX_WORKERS):
-            logger.info(f"Processing batch {i // MAX_WORKERS + 1} of {len(tickers) // MAX_WORKERS + 1}")
-            batch = tickers[i : i + MAX_WORKERS]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=DCF_MAX_WORKERS) as executor:
+        for i in range(0, len(tickers), DCF_MAX_WORKERS):
+            logger.info(f"Processing batch {i // DCF_MAX_WORKERS + 1} of {(len(tickers) + DCF_MAX_WORKERS - 1) // DCF_MAX_WORKERS}")
+            batch = tickers[i : i + DCF_MAX_WORKERS]
             futures = [
                 executor.submit(process_ticker, ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, dcf_db, fx_rates)
                 for ticker in batch
@@ -68,8 +69,11 @@ def run_dcf_scrape(tickers, client):
                 if yahoo_overview:
                     yahoo_overviews[yahoo_overview["Ticker"]] = yahoo_overview
                 if not success:
-                    failure_counts[failure_reason] = failure_counts.get(failure_reason, 0) + 1
-                    batch_failure_counts[failure_reason] = batch_failure_counts.get(failure_reason, 0) + 1
+                    if failure_reason and failure_reason.startswith("skipped:"):
+                        skipped_counts[failure_reason] = skipped_counts.get(failure_reason, 0) + 1
+                    else:
+                        failure_counts[failure_reason] = failure_counts.get(failure_reason, 0) + 1
+                        batch_failure_counts[failure_reason] = batch_failure_counts.get(failure_reason, 0) + 1
                     continue
 
             if batch_failure_counts.get("yahoo_rate_limit") == len(batch):
@@ -83,11 +87,13 @@ def run_dcf_scrape(tickers, client):
             else:
                 consecutive_rate_limited_batches = 0
 
-            if i + MAX_WORKERS < len(tickers):
+            if i + DCF_MAX_WORKERS < len(tickers):
                 time.sleep(1)
 
     num_errors = sum(failure_counts.values())
     logger.info("DCF scrape completed: %s errors out of %s tickers", num_errors, len(tickers))
+    if skipped_counts:
+        logger.info("DCF skipped summary: %s", ", ".join(f"{reason}: {count}" for reason, count in sorted(skipped_counts.items())))
     if failure_counts:
         logger.warning("DCF failure summary: %s", ", ".join(f"{reason}: {count}" for reason, count in sorted(failure_counts.items())))
 
@@ -160,7 +166,8 @@ def run_comps_scrape(tickers, client, cached_yahoo_profiles=None):
     data = combined.to_dict(orient="records")
     data = json.loads(json.dumps(data, cls=CustomEncoder))
     for record in data:
-        db.update_one({"Ticker": record["Ticker"]}, {"$set": record}, upsert=True)
+        cleaned_record = {key: value for key, value in record.items() if value is not None}
+        db.update_one({"Ticker": record["Ticker"]}, {"$set": cleaned_record}, upsert=True)
 
 
 def main():
@@ -203,6 +210,29 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
         return False, None, None, "timeout"
     except YFRateLimitError:
         return False, None, None, "yahoo_rate_limit"
+    except MissingFinancialStatements:
+        try:
+            yf_ticker = yf.Ticker(ticker)
+            info = yf_ticker.get_info()
+            yahoo_profile = build_yahoo_profile(info.get("symbol", ticker), info)
+            try:
+                yahoo_overview = build_yahoo_overview(yf_ticker, info)
+            except Exception:
+                yahoo_overview = None
+
+            # If Yahoo still knows this is a live operating equity, empty financial
+            # statements are usually a transient Yahoo/crumb/rate-limit failure, not
+            # a real no-data symbol. Count it as a rate-limit style failure so the
+            # batch-level circuit breaker can pause/stop instead of hiding thousands
+            # of valid companies as skips.
+            if info.get("quoteType") == "EQUITY" and info.get("marketCap"):
+                logger.warning("%s has quote/profile data but no statements; treating as Yahoo statement fetch failure", ticker)
+                return False, yahoo_profile, yahoo_overview, "yahoo_rate_limit"
+
+            return False, yahoo_profile, yahoo_overview, "skipped:missing_financial_statements"
+        except Exception:
+            logger.debug("Yahoo fallback failed for %s\n%s", ticker, traceback.format_exc())
+            return False, None, None, "skipped:missing_financial_statements"
     except Exception as e:
         failure_reason = _exception_location(e)
         logger.debug("DCF scrape failed for %s\n%s", ticker, "".join(traceback.format_exception(type(e), e, e.__traceback__)))

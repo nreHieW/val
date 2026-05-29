@@ -8,11 +8,10 @@ from io import StringIO
 
 import numpy as np
 import pandas as pd
-import requests
 from bs4 import BeautifulSoup
 
-from scrape.core.config import JSON_LOCK, MAX_WORKERS, REQUEST_TIMEOUT_SECONDS, headers
-from scrape.core.http_utils import get_htmls
+from scrape.core.config import JSON_LOCK, MAX_WORKERS
+from scrape.core.http_utils import browser_get, get_htmls
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +25,7 @@ def get_marketscreener_url(ticker, name: str = ""):
                 return cached_link
 
     search_url = "https://www.marketscreener.com/search/?q=" + "+".join(ticker.split())
-    page = requests.get(search_url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+    page = browser_get(search_url)
     soup = BeautifulSoup(page.content, "lxml")
     rows = soup.find_all("tr")
     found_link = None
@@ -41,7 +40,7 @@ def get_marketscreener_url(ticker, name: str = ""):
 
     if not found_link and name:
         search_url = "https://www.marketscreener.com/search/?q=" + "+".join(name.split())
-        page = requests.get(search_url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+        page = browser_get(search_url)
         soup = BeautifulSoup(page.content, "lxml")
         rows = soup.find_all("tr")
         for row in rows:
@@ -72,7 +71,7 @@ def get_marketscreener_url(ticker, name: str = ""):
 def get_revenue_by_region(ticker, url):
     if not url:
         raise ValueError(f"No MarketScreener URL for {ticker}")
-    page = requests.get(url + "company/", headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+    page = browser_get(url + "company/")
     soup = BeautifulSoup(page.content, "lxml")
     df = None
     for div in soup.find_all("div", {"class": "card mb-15 card--collapsible card--scrollable"}):
@@ -93,7 +92,7 @@ def get_revenue_by_region(ticker, url):
 
 
 def get_revenue_forecasts(url):
-    page = requests.get(url + "finances/", headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+    page = browser_get(url + "finances/")
     soup = BeautifulSoup(page.content, features="lxml")
     for div in soup.find_all("div", {"class": "card card--collapsible mb-15"}):
         header = div.find("div", {"class": "card-header"})
@@ -137,7 +136,7 @@ def get_revenue_forecasts(url):
                 if pd.notna(value)
             }
             growth = indiv.pct_change(axis=1)
-            revenue_growth_rate_next_year = growth.values[0][1] if growth.shape[1] > 1 and pd.notna(growth.values[0][1]) else 0
+            revenue_growth_rate_next_year = float(growth.values[0][1]) if growth.shape[1] > 1 and pd.notna(growth.values[0][1]) else 0
             raw_compounded_growth_rates = [value for value in growth.values[0][1:] if pd.notna(value)]
             compounded_annual_revenue_growth_rate = float(np.mean(raw_compounded_growth_rates)) if raw_compounded_growth_rates else 0
             ebit = pd.Series(dtype=float)
@@ -194,8 +193,7 @@ def parse_marketscreener(marketscreener_urls):
     if not marketscreener_urls:
         return pd.DataFrame()
 
-    htmls = get_htmls(list(marketscreener_urls.values()))
-    htmls = dict(zip(marketscreener_urls.keys(), htmls))
+    htmls = dict(zip(marketscreener_urls.keys(), get_htmls(list(marketscreener_urls.values()), browser=True)))
     dfs = []
 
     for ticker, html in htmls.items():

@@ -1,16 +1,21 @@
 import concurrent.futures
 import datetime
 import logging
+import random
 import time
 
 import numpy as np
 import pandas as pd
-import requests
 import yfinance as yf
-from bs4 import BeautifulSoup
 from yfinance.exceptions import YFRateLimitError
 
-from scrape.core.config import REQUEST_TIMEOUT_SECONDS, YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS, headers
+from scrape.core.config import (
+    YAHOO_FINANCIAL_JITTER_SECONDS,
+    YAHOO_FINANCIAL_MIN_INTERVAL_SECONDS,
+    YAHOO_INFO_RETRIES,
+    YAHOO_INFO_RETRY_SLEEP_SECONDS,
+)
+from scrape.core.rate_limit import RateLimiter
 from scrape.sources.marketscreener import get_marketscreener_url, get_revenue_by_region, get_revenue_forecasts
 from scrape.sources.yahoo_overview import build_yahoo_overview
 from scrape.sources.yahoo_profiles import build_yahoo_profile, normalize_quarterly_statement
@@ -24,6 +29,42 @@ from scrape.valuation.statements import (
 from scrape.valuation.string_mapper import StringMapper
 
 logger = logging.getLogger(__name__)
+_yahoo_financial_limiter = RateLimiter(YAHOO_FINANCIAL_MIN_INTERVAL_SECONDS, YAHOO_FINANCIAL_JITTER_SECONDS)
+
+
+class MissingFinancialStatements(ValueError):
+    """Raised when Yahoo has no usable financial statements for DCF valuation."""
+
+
+_CURRENCY_ALIASES = {
+    "IN": "INR",
+    "RS": "INR",
+    "RMB": "CNY",
+    "CNH": "CNY",
+    "GB PENCE": "GBX",
+    "PENCE": "GBX",
+}
+
+
+def _is_transient_yahoo_error(exc):
+    if isinstance(exc, (YFRateLimitError, TimeoutError, ConnectionError, IndexError)):
+        return True
+    message = str(exc).lower()
+    return any(token in message for token in ("rate limit", "too many requests", "crumb", "cookie", "timeout"))
+
+
+def _with_yahoo_retries(label, func, *, financial_endpoint: bool = False):
+    for attempt in range(YAHOO_INFO_RETRIES):
+        try:
+            if financial_endpoint:
+                _yahoo_financial_limiter.wait()
+            return func()
+        except Exception as exc:
+            if attempt == YAHOO_INFO_RETRIES - 1 or not _is_transient_yahoo_error(exc):
+                raise
+            sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1) + random.uniform(0, 0.75)
+            logger.debug("%s Yahoo failure (%s); retrying in %.1fs", label, exc, sleep_seconds)
+            time.sleep(sleep_seconds)
 
 
 def _balance_sheet_scalar(df: pd.DataFrame, key: str, default: float = 0) -> float:
@@ -33,30 +74,64 @@ def _balance_sheet_scalar(df: pd.DataFrame, key: str, default: float = 0) -> flo
     return float(default) if pd.isna(val) else float(val)
 
 
-def get_similar_stocks(ticker: str):
-    url = f"https://www.tipranks.com/stocks/{ticker.lower()}/similar-stocks"
-    response = requests.get(
-        url,
-        headers=headers,
-        timeout=REQUEST_TIMEOUT_SECONDS,
+def _usd_fx_rate(currency: str | None, fx_rates: dict) -> float:
+    """Return the USD conversion rate for one unit of currency; fail if unavailable."""
+    if not currency:
+        return 1.0
+
+    currency = _CURRENCY_ALIASES.get(str(currency).strip().upper(), str(currency).strip().upper())
+    if currency == "USD":
+        return 1.0
+
+    resolved = fx_rates.get(currency)
+    if resolved:
+        return float(resolved)
+
+    if currency in {"GBX", "GBP=X"}:
+        resolved = fx_rates.get("GBP")
+        if resolved:
+            return float(resolved) / 100
+
+    yahoo_pair = f"{currency}USD=X"
+    history = yf.Ticker(yahoo_pair).history(period="5d")
+    close = history.Close.dropna()
+    if not close.empty:
+        return float(close.iloc[-1].item())
+
+    raise ValueError(f"Missing USD FX rate for {currency} via {yahoo_pair}")
+
+
+def _income_statement_for_dcf(ticker: yf.Ticker) -> tuple[pd.DataFrame, bool]:
+    """Return quarterly income statement only; fail loudly when Yahoo returns empty data."""
+    symbol = ticker.ticker
+    for attempt in range(YAHOO_INFO_RETRIES):
+        current_ticker = ticker if attempt == 0 else yf.Ticker(symbol)
+        quarterly = normalize_quarterly_statement(
+            _with_yahoo_retries(
+                symbol + " quarterly_income_stmt",
+                lambda: current_ticker.quarterly_income_stmt,
+                financial_endpoint=True,
+            )
+        )
+        if not quarterly.empty:
+            return quarterly, False
+
+        if attempt < YAHOO_INFO_RETRIES - 1:
+            sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1) + random.uniform(0, 0.75)
+            logger.debug("%s quarterly income statement empty; retrying in %.1fs", symbol, sleep_seconds)
+            time.sleep(sleep_seconds)
+
+    raise MissingFinancialStatements(f"empty_quarterly_income_statement_after_retries:{symbol}")
+
+
+def r_and_d_handler(income_statement: pd.DataFrame, industry: str):
+    r_and_d_series = get_statement_metric_series(
+        income_statement,
+        ["Research And Development", "Research Development"],
     )
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    return [x.text for x in soup.find_all("a", {"data-link": "stock"})]
-
-
-def r_and_d_handler(ticker, industry):
-    url = f"https://ycharts.com/companies/{ticker.upper()}/r_and_d_expense_ttm"
-    response = requests.get(
-        url,
-        headers={"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.142 Safari/537.36"},
-        timeout=REQUEST_TIMEOUT_SECONDS,
-    )
-    soup = BeautifulSoup(response.text, "html.parser")
-    htmls = soup.find_all("table")
-    df = pd.concat([pd.read_html(str(htmls))[0], pd.read_html(str(htmls))[1]]).iloc[::4]
-    df["Value"] = df["Value"].apply(lambda x: {"B": 10**9, "M": 10**6, "K": 10**3}.get(x[-1], 1) * float(x[:-1]))
-    expenses = df["Value"].tolist()
+    expenses = [float(value) for value in r_and_d_series.dropna().tolist() if value > 0]
+    if not expenses:
+        raise ValueError("No R&D expense history")
     num_years = {
         "Advertising": 2,
         "Aerospace/Defense": 10,
@@ -171,19 +246,19 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     value_of_options = 0
 
     ticker = yf.Ticker(ticker)
-    quarterly_income_statement = normalize_quarterly_statement(ticker.quarterly_income_stmt)
-    ttm_income_statement = quarterly_income_statement[quarterly_income_statement.columns[:4]].T.fillna(0)
-    last_balance_sheet = ticker.quarterly_balance_sheet
-    last_balance_sheet = last_balance_sheet[last_balance_sheet.columns[:4]].T.ffill().bfill()
-    info = {}
-    for attempt in range(YAHOO_INFO_RETRIES):
-        try:
-            info = ticker.get_info() or {}
-            break
-        except YFRateLimitError:
-            if attempt == YAHOO_INFO_RETRIES - 1:
-                raise
-            time.sleep(YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1))
+    quarterly_income_statement, _ = _income_statement_for_dcf(ticker)
+    ttm_columns = list(quarterly_income_statement.columns[:4])
+    ttm_income_statement = quarterly_income_statement.loc[:, ttm_columns].T.fillna(0)
+    last_balance_sheet = _with_yahoo_retries(
+        ticker.ticker + " quarterly_balance_sheet",
+        lambda: ticker.quarterly_balance_sheet,
+        financial_endpoint=True,
+    )
+    if last_balance_sheet.empty:
+        raise MissingFinancialStatements(f"empty_quarterly_balance_sheet:{ticker.ticker}")
+    else:
+        last_balance_sheet = last_balance_sheet[last_balance_sheet.columns[:4]].T.ffill().bfill()
+    info = _with_yahoo_retries(ticker.ticker + " info", lambda: ticker.get_info() or {})
 
     symbol = info.get("symbol") or ticker.ticker
     yahoo_profile = build_yahoo_profile(symbol, info)
@@ -194,19 +269,15 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
         yahoo_overview = None
     name = info.get("longName") or info.get("shortName") or symbol
     curr_currency = info.get("financialCurrency")
-    fx_rate = 1
-    if curr_currency:
-        resolved_fx_rate = fx_rates.get(curr_currency)
-        if resolved_fx_rate:
-            fx_rate = resolved_fx_rate
-            last_balance_sheet = last_balance_sheet.apply(lambda x: x * fx_rate)
-            ttm_income_statement["Operating Revenue"] = ttm_income_statement.get("Operating Revenue", 0) * fx_rate
-            ttm_income_statement["Interest Expense"] = ttm_income_statement.get("Interest Expense", 0) * fx_rate
-            ttm_income_statement["Pretax Income"] = ttm_income_statement.get("Pretax Income", 0) * fx_rate
-            ttm_income_statement["Net Income"] = ttm_income_statement.get("Net Income", 0) * fx_rate
-            ttm_income_statement["Operating Income"] = ttm_income_statement.get("Operating Income", 0) * fx_rate
+    fx_rate = _usd_fx_rate(curr_currency, fx_rates)
+    if fx_rate != 1:
+        last_balance_sheet = last_balance_sheet.apply(lambda x: x * fx_rate)
+        ttm_income_statement["Operating Revenue"] = ttm_income_statement.get("Operating Revenue", 0) * fx_rate
+        ttm_income_statement["Interest Expense"] = ttm_income_statement.get("Interest Expense", 0) * fx_rate
+        ttm_income_statement["Pretax Income"] = ttm_income_statement.get("Pretax Income", 0) * fx_rate
+        ttm_income_statement["Net Income"] = ttm_income_statement.get("Net Income", 0) * fx_rate
+        ttm_income_statement["Operating Income"] = ttm_income_statement.get("Operating Income", 0) * fx_rate
 
-    ttm_columns = list(quarterly_income_statement.columns[:4])
     revenue_series = get_statement_metric_series(
         quarterly_income_statement,
         ["Total Revenue", "Operating Revenue", "Revenue"],
@@ -277,12 +348,13 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     target_pre_tax_operating_margin = avg_metrics["Pre-tax Operating Margin (Unadjusted)"].get(industry, 0)
 
     operating_margin_this_year = info.get("operatingMargins", operating_income_ttm / revenues if revenues else 0)
+    forecast_fx_rate = _usd_fx_rate(forecast_defaults.get("currency") or curr_currency, fx_rates)
     consensus_revenues_usd = {
-        year: value * fx_rate
+        year: value * forecast_fx_rate
         for year, value in forecast_defaults.get("consensus_revenues", {}).items()
     }
     consensus_ebit_usd = {
-        year: value * fx_rate
+        year: value * forecast_fx_rate
         for year, value in forecast_defaults.get("consensus_ebit", {}).items()
     }
     fiscal_bridge_context = build_fiscal_bridge_context(info, quarterly_income_statement)
@@ -357,15 +429,15 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     sales_to_capital_ratio_early = curr_sales_to_capital_ratio
     sales_to_capital_ratio_steady = avg_metrics["Sales/Capital"].get(industry, 1)
     try:
-        r_and_d_expenses = r_and_d_handler(symbol, industry)
+        annual_income_stmt = _with_yahoo_retries(
+            ticker.ticker + " income_stmt",
+            lambda: ticker.income_stmt,
+            financial_endpoint=True,
+        )
+        r_and_d_expenses = r_and_d_handler(annual_income_stmt, industry)
     except Exception as e:
         logger.debug("%s R&D expense unavailable; using empty history: %s", symbol, e)
         r_and_d_expenses = []
-    try:
-        similar_stocks = get_similar_stocks(symbol)
-    except Exception as e:
-        logger.debug("%s similar stocks unavailable; using empty list: %s", symbol, e)
-        similar_stocks = []
     return {
         "dcf_inputs": {
             "name": name,
@@ -402,7 +474,6 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
                 "industry": industry,
                 "historical_revenue_growth": info.get("revenueGrowth", 0),
                 "mapped_regional_revenues": mapped_regional_revenues,
-                "similar_stocks": similar_stocks,
                 "research_and_development": r_and_d_expenses,
                 "last_updated_financials": ttm_income_statement.index[0].strftime("%Y-%m-%d"),
                 "forecast_context": {

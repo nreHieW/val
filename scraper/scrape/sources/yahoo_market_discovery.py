@@ -7,6 +7,8 @@ from yfinance import EquityQuery, screen
 from yfinance.exceptions import YFRateLimitError
 
 from scrape.core.config import YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS
+from scrape.core.rate_limit import yahoo_call
+from scrape.sources.yahoo_profiles import get_yahoo_info
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +40,7 @@ SIMILAR_COMPANY_SCREEN_SIZE = 250
 def _yahoo_call(label, fn, retry_none=False):
     for attempt in range(YAHOO_INFO_RETRIES):
         try:
-            result = fn()
+            result = yahoo_call(fn, retries=1)
             if result is not None or not retry_none:
                 return result
         except YFRateLimitError:
@@ -53,7 +55,7 @@ def _yahoo_call(label, fn, retry_none=False):
 
 
 def get_similar_companies(source):
-    info = _yahoo_call(f"{source} similar companies", lambda: yf.Ticker(source).get_info())
+    info = _yahoo_call(f"{source} similar companies", lambda: get_yahoo_info(source))
     if info is None:
         return None
     industry = info["industry"].replace(" - ", "—")

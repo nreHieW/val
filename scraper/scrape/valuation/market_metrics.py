@@ -1,9 +1,13 @@
+import logging
 import pandas as pd
-import requests
 import yfinance as yf
 
 from scrape.core.config import CURRENCIES, REQUEST_TIMEOUT_SECONDS, headers
+from scrape.core.http_utils import request_get
+from scrape.core.rate_limit import yahoo_call
 from scrape.valuation.string_mapper import StringMapper
+
+logger = logging.getLogger(__name__)
 
 
 def get_exchange_rates():
@@ -12,9 +16,13 @@ def get_exchange_rates():
         if currency == "USD":
             fx_rate[currency] = 1.0
             continue
-        history = yf.Ticker(currency + "USD=X").history(period="5d")
+        history = yahoo_call(lambda symbol=currency + "USD=X": yf.Ticker(symbol).history(period="5d"))
         close = history.Close.dropna()
-        fx_rate[currency] = close.iloc[-1].item() if not close.empty else 1.0
+        if close.empty:
+            logger.warning("Missing FX rate for %s via Yahoo Finance", currency + "USD=X")
+            fx_rate[currency] = 1.0
+        else:
+            fx_rate[currency] = close.iloc[-1].item()
     return fx_rate
 
 
@@ -58,7 +66,7 @@ def get_industry_beta(industry: str, sector: str, mapper: StringMapper, industry
 
 def get_10year_tbill():
     url = "https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol?symbols=US10Y&requestMethod=itv&noform=1&partnerId=2&fund=1&exthrs=1&output=json&events=1"
-    res = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS).json()
+    res = request_get(url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS).json()
     raw = res["FormattedQuoteResult"]["FormattedQuote"][0]["last"]
     res = raw.replace("%", "")
     return float(res) / 100

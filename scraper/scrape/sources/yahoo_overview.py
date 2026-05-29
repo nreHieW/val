@@ -2,6 +2,8 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
+from scrape.core.rate_limit import yahoo_call
+
 
 def _clean_value(value):
     if value is None or pd.isna(value):
@@ -39,7 +41,7 @@ def _extract_recommendation_mix(df: pd.DataFrame):
     for record in records:
         if record.get("period") == "0m":
             return record
-    raise ValueError("Yahoo recommendations summary missing period")
+    return None
 
 
 def _extract_earnings_estimates(df: pd.DataFrame):
@@ -52,18 +54,27 @@ def _extract_earnings_estimates(df: pd.DataFrame):
     }
 
 
+def _safe_yahoo(fn, default):
+    try:
+        return yahoo_call(fn)
+    except Exception:
+        return default
+
+
 def build_yahoo_overview(yf_ticker, info: dict):
     symbol = info.get("symbol") or yf_ticker.ticker
     current_price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
-    analyst_targets = yf_ticker.get_analyst_price_targets()
-    earnings_estimates = _extract_earnings_estimates(yf_ticker.get_earnings_estimate())
-    recommendations = _extract_recommendation_mix(yf_ticker.get_recommendations_summary())
-    major_holders = _dict_from_dataframe(yf_ticker.get_major_holders())
-    insider_roster = _records_from_dataframe(yf_ticker.get_insider_roster_holders(), limit=10)
+    previous_close = info.get("previousClose")
+    empty_df = pd.DataFrame()
+    analyst_targets = _safe_yahoo(lambda: yf_ticker.get_analyst_price_targets(), {}) or {}
+    earnings_estimates = _extract_earnings_estimates(_safe_yahoo(lambda: yf_ticker.get_earnings_estimate(), empty_df))
+    recommendations = _extract_recommendation_mix(_safe_yahoo(lambda: yf_ticker.get_recommendations_summary(), empty_df))
+    major_holders = _dict_from_dataframe(_safe_yahoo(lambda: yf_ticker.get_major_holders(), empty_df))
+    insider_roster = _records_from_dataframe(_safe_yahoo(lambda: yf_ticker.get_insider_roster_holders(), empty_df), limit=10)
     target_mean = analyst_targets.get("mean")
     target_median = analyst_targets.get("median")
     target_reference = target_median or target_mean
-    target_upside = (target_reference / current_price) - 1
+    target_upside = (target_reference / current_price) - 1 if target_reference and current_price else None
 
     return {
         "Ticker": symbol,
@@ -78,7 +89,7 @@ def build_yahoo_overview(yf_ticker, info: dict):
         },
         "market": {
             "price": current_price,
-            "dayChangePercent": (current_price / info.get("previousClose")) - 1,
+            "dayChangePercent": (current_price / previous_close) - 1 if current_price and previous_close else None,
             "marketCap": info.get("marketCap"),
             "enterpriseValue": info.get("enterpriseValue"),
             "beta": info.get("beta"),

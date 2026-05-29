@@ -4,10 +4,9 @@ import logging
 import os
 import time
 import traceback
+
 import pandas as pd
-import yfinance as yf
 from pymongo import UpdateOne
-from yfinance.exceptions import YFRateLimitError
 
 from scrape.core.config import DCF_MAX_WORKERS, TICKER_TIMEOUT_SECONDS
 from scrape.core.http_utils import run_with_timeout
@@ -19,6 +18,7 @@ from scrape.sources.marketscreener import load_marketscreener_cache, save_market
 from scrape.sources.yahoo_market_discovery import get_sector_industries, get_similar_companies
 from scrape.sources.yahoo_overview import build_yahoo_overview
 from scrape.sources.yahoo_profiles import build_yahoo_profile, compute_ttm_financials, get_and_parse_yahoo
+from scrape.sources.yahooquery_adapter import YahooQueryTicker
 from scrape.sources.yahoo_snapshot import get_yahoo_snapshots
 from scrape.valuation.dcf_inputs import MissingFinancialStatements, get_dcf_inputs
 from scrape.valuation.market_metrics import (
@@ -31,7 +31,7 @@ from scrape.valuation.market_metrics import (
 from scrape.valuation.string_mapper import StringMapper
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(levelname)s: %(message)s")
-logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+logging.getLogger("yahooquery").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -64,7 +64,6 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
     yahoo_overviews = {}
     dcf_records = []
 
-    consecutive_rate_limited_batches = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=DCF_MAX_WORKERS) as executor, concurrent.futures.ThreadPoolExecutor(max_workers=DCF_MAX_WORKERS * 2) as marketscreener_executor:
         for i in range(0, len(tickers), DCF_MAX_WORKERS):
             logger.info(f"Processing batch {i // DCF_MAX_WORKERS + 1} of {(len(tickers) + DCF_MAX_WORKERS - 1) // DCF_MAX_WORKERS}")
@@ -85,8 +84,6 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
                 ): ticker
                 for ticker in batch
             }
-            batch_failure_counts = {}
-
             for future in concurrent.futures.as_completed(futures):
                 ticker = futures[future]
                 success, dcf_inputs, yahoo_profile, yahoo_overview, failure_reason = future.result()
@@ -101,19 +98,7 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
                         skipped_counts[failure_reason] = skipped_counts.get(failure_reason, 0) + 1
                     else:
                         failure_counts[failure_reason] = failure_counts.get(failure_reason, 0) + 1
-                        batch_failure_counts[failure_reason] = batch_failure_counts.get(failure_reason, 0) + 1
                     continue
-
-            if batch_failure_counts.get("yahoo_rate_limit") == len(batch):
-                consecutive_rate_limited_batches += 1
-                if consecutive_rate_limited_batches >= 3:
-                    remaining = len(tickers) - i - len(batch)
-                    if remaining > 0:
-                        failure_counts["skipped_after_rate_limit"] = remaining
-                    logger.warning("Stopping DCF scrape early after repeated Yahoo rate-limited batches")
-                    break
-            else:
-                consecutive_rate_limited_batches = 0
 
             if i + DCF_MAX_WORKERS < len(tickers):
                 time.sleep(1)
@@ -237,13 +222,10 @@ def _exception_location(exc: Exception) -> str:
 
 
 def _fallback_yahoo_profile(ticker, yahoo_snapshot):
-    yf_ticker = yahoo_snapshot.yf_ticker if yahoo_snapshot else yf.Ticker(ticker)
-    info = yahoo_snapshot.info if yahoo_snapshot and yahoo_snapshot.info else yf_ticker.get_info()
+    yahoo_ticker = yahoo_snapshot.yahoo_ticker if yahoo_snapshot else YahooQueryTicker(ticker)
+    info = yahoo_snapshot.info if yahoo_snapshot and yahoo_snapshot.info else yahoo_ticker.get_info()
     yahoo_profile = build_yahoo_profile(info.get("symbol", ticker), info)
-    try:
-        yahoo_overview = build_yahoo_overview(yf_ticker, info)
-    except Exception:
-        yahoo_overview = None
+    yahoo_overview = build_yahoo_overview(yahoo_ticker, info)
     return info, yahoo_profile, yahoo_overview
 
 
@@ -268,20 +250,13 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
         return True, dcf_inputs, dcf_result.get("yahoo_profile"), dcf_result.get("yahoo_overview"), None
     except TimeoutError:
         return False, None, None, None, "timeout"
-    except YFRateLimitError:
-        return False, None, None, None, "yahoo_rate_limit"
     except MissingFinancialStatements:
         try:
             info, yahoo_profile, yahoo_overview = _fallback_yahoo_profile(ticker, yahoo_snapshot)
 
-            # If Yahoo still knows this is a live operating equity, empty financial
-            # statements are usually a transient Yahoo/crumb/rate-limit failure, not
-            # a real no-data symbol. Count it as a rate-limit style failure so the
-            # batch-level circuit breaker can pause/stop instead of hiding thousands
-            # of valid companies as skips.
             if info.get("quoteType") == "EQUITY" and info.get("marketCap"):
-                logger.warning("%s has quote/profile data but no statements; treating as Yahoo statement fetch failure", ticker)
-                return False, None, yahoo_profile, yahoo_overview, "yahoo_rate_limit"
+                logger.warning("%s has quote/profile data but no statements", ticker)
+                return False, None, yahoo_profile, yahoo_overview, "yahoo_statement_failure"
 
             return False, None, yahoo_profile, yahoo_overview, "skipped:missing_financial_statements"
         except Exception:

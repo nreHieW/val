@@ -6,9 +6,6 @@ import time
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
-from yfinance.exceptions import YFRateLimitError
-
 from scrape.core.config import (
     YAHOO_FINANCIAL_JITTER_SECONDS,
     YAHOO_FINANCIAL_MIN_INTERVAL_SECONDS,
@@ -19,6 +16,7 @@ from scrape.core.rate_limit import RateLimiter
 from scrape.sources.marketscreener import get_marketscreener_url, get_revenue_by_region, get_revenue_forecasts
 from scrape.sources.yahoo_overview import build_yahoo_overview
 from scrape.sources.yahoo_profiles import build_yahoo_profile, normalize_quarterly_statement
+from scrape.sources.yahooquery_adapter import YahooQueryTicker, yahooquery_close_series
 from scrape.valuation.market_metrics import get_industry_beta, get_regional_crps, synthetic_rating
 from scrape.valuation.statements import (
     bridge_fiscal_year_values,
@@ -47,10 +45,10 @@ _CURRENCY_ALIASES = {
 
 
 def _is_transient_yahoo_error(exc):
-    if isinstance(exc, (YFRateLimitError, TimeoutError, ConnectionError, IndexError)):
+    if isinstance(exc, (TimeoutError, ConnectionError, IndexError)):
         return True
     message = str(exc).lower()
-    return any(token in message for token in ("rate limit", "too many requests", "crumb", "cookie", "timeout"))
+    return any(token in message for token in ("rate limit", "too many requests", "timeout"))
 
 
 def _with_yahoo_retries(label, func, *, financial_endpoint: bool = False):
@@ -93,19 +91,19 @@ def _usd_fx_rate(currency: str | None, fx_rates: dict) -> float:
             return float(resolved) / 100
 
     yahoo_pair = f"{currency}USD=X"
-    history = yf.Ticker(yahoo_pair).history(period="5d")
-    close = history.Close.dropna()
+    history = YahooQueryTicker(yahoo_pair).history(period="5d")
+    close = yahooquery_close_series(history)
     if not close.empty:
         return float(close.iloc[-1].item())
 
     raise ValueError(f"Missing USD FX rate for {currency} via {yahoo_pair}")
 
 
-def _income_statement_for_dcf(ticker: yf.Ticker) -> tuple[pd.DataFrame, bool]:
+def _income_statement_for_dcf(ticker: YahooQueryTicker) -> pd.DataFrame:
     """Return quarterly income statement only; fail loudly when Yahoo returns empty data."""
     symbol = ticker.ticker
     for attempt in range(YAHOO_INFO_RETRIES):
-        current_ticker = ticker if attempt == 0 else yf.Ticker(symbol)
+        current_ticker = ticker if attempt == 0 else YahooQueryTicker(symbol)
         quarterly = normalize_quarterly_statement(
             _with_yahoo_retries(
                 symbol + " quarterly_income_stmt",
@@ -114,7 +112,7 @@ def _income_statement_for_dcf(ticker: yf.Ticker) -> tuple[pd.DataFrame, bool]:
             )
         )
         if not quarterly.empty:
-            return quarterly, False
+            return quarterly
 
         if attempt < YAHOO_INFO_RETRIES - 1:
             sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1) + random.uniform(0, 0.75)
@@ -245,10 +243,10 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     marginal_tax_rate = 0.21
     value_of_options = 0
 
-    ticker = yahoo_snapshot.yf_ticker if yahoo_snapshot else yf.Ticker(ticker)
+    ticker = yahoo_snapshot.yahoo_ticker if yahoo_snapshot else YahooQueryTicker(ticker)
     quarterly_income_statement = yahoo_snapshot.quarterly_income_stmt if yahoo_snapshot is not None else pd.DataFrame()
     if quarterly_income_statement.empty:
-        quarterly_income_statement, _ = _income_statement_for_dcf(ticker)
+        quarterly_income_statement = _income_statement_for_dcf(ticker)
     ttm_columns = list(quarterly_income_statement.columns[:4])
     ttm_income_statement = quarterly_income_statement.loc[:, ttm_columns].T.fillna(0)
     last_balance_sheet = yahoo_snapshot.quarterly_balance_sheet if yahoo_snapshot is not None else pd.DataFrame()

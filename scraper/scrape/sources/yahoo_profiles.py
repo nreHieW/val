@@ -10,6 +10,7 @@ from yfinance.exceptions import YFRateLimitError
 
 from scrape.core.config import YAHOO_INFO_MAX_WORKERS, YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS
 from scrape.core.rate_limit import yahoo_call
+from scrape.sources.sec_companyfacts import get_sec_ttm_financials
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +56,14 @@ def normalize_quarterly_statement(statement: pd.DataFrame) -> pd.DataFrame:
 
 def sum_statement_metric(statement: pd.DataFrame, metric_names: list[str], start=0, count=4):
     columns = list(statement.columns[start : start + count])
+    if len(columns) < count:
+        return None
 
     for metric_name in metric_names:
         if metric_name in statement.index:
-            values = pd.to_numeric(statement.loc[metric_name, columns], errors="coerce").fillna(0)
+            values = pd.to_numeric(statement.loc[metric_name, columns], errors="coerce")
+            if values.isna().any():
+                return None
             return float(values.sum())
 
     return None
@@ -86,6 +91,8 @@ def compute_ebitda(statement: pd.DataFrame, start=0, count=4):
 
 
 def get_ttm_financials(ticker, yahoo_snapshot=None):
+    sec_financials = get_sec_ttm_financials(ticker)
+
     for attempt in range(YAHOO_INFO_RETRIES):
         try:
             if yahoo_snapshot is not None:
@@ -144,6 +151,8 @@ def get_ttm_financials(ticker, yahoo_snapshot=None):
                 "Free Cash Flow TTM": sum_statement_metric(quarterly_cashflow, ["Free Cash Flow"]),
                 "TTM Period End": pd.Timestamp(most_recent_quarter).strftime("%Y-%m-%d"),
             }
+            if sec_financials:
+                result.update({key: value for key, value in sec_financials.items() if value is not None})
             return result
         except YFRateLimitError:
             if attempt == YAHOO_INFO_RETRIES - 1:

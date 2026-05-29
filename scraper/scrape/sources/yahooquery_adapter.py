@@ -14,20 +14,6 @@ _TARGET_KEYS = {
 }
 
 
-def _get_symbol_payload(payload, symbol: str):
-    if not isinstance(payload, dict):
-        return payload
-    if symbol in payload:
-        value = payload[symbol]
-    elif symbol.upper() in payload:
-        value = payload[symbol.upper()]
-    else:
-        raise ValueError(f"Yahoo query returned no payload for {symbol}")
-    if isinstance(value, dict) and value.get("error"):
-        raise ValueError(f"Yahoo query failed for {symbol}: {value['error']}")
-    return value or {}
-
-
 def _humanize_field(name: str) -> str:
     name = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name)
     return re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", name)
@@ -59,20 +45,46 @@ def get_yahooquery_info(symbol: str) -> dict:
 class YahooQueryTicker:
     def __init__(self, symbol: str):
         self.ticker = symbol
-        self._client = Ticker(symbol)
+        self.yahoo_symbol = symbol.replace(".", "-")
+        self._client = Ticker(self.yahoo_symbol)
         self._info = None
+
+    def _payload(self, payload, *, required=False):
+        if not isinstance(payload, dict):
+            if required:
+                raise ValueError(f"Yahoo query returned invalid payload for {self.ticker}: {payload}")
+            return {}
+
+        if self.yahoo_symbol in payload:
+            value = payload[self.yahoo_symbol]
+        elif self.ticker in payload:
+            value = payload[self.ticker]
+        elif self.ticker.upper() in payload:
+            value = payload[self.ticker.upper()]
+        else:
+            if required:
+                raise ValueError(f"Yahoo query returned no payload for {self.ticker}")
+            return {}
+
+        if isinstance(value, dict) and value.get("error"):
+            raise ValueError(f"Yahoo query failed for {self.ticker}: {value['error']}")
+        if isinstance(value, str):
+            if required or "quote not found" in value.lower():
+                raise ValueError(f"Yahoo query failed for {self.ticker}: {value}")
+            return {}
+        return value or {}
 
     def get_info(self) -> dict:
         if self._info is None:
-            profile = _get_symbol_payload(self._client.summary_profile, self.ticker)
-            detail = _get_symbol_payload(self._client.summary_detail, self.ticker)
-            financial = _get_symbol_payload(self._client.financial_data, self.ticker)
-            key_stats = _get_symbol_payload(self._client.key_stats, self.ticker)
-            quote_type = _get_symbol_payload(self._client.quote_type, self.ticker)
-            price = _get_symbol_payload(self._client.price, self.ticker)
+            profile = self._payload(self._client.summary_profile)
+            detail = self._payload(self._client.summary_detail)
+            financial = self._payload(self._client.financial_data)
+            key_stats = self._payload(self._client.key_stats)
+            quote_type = self._payload(self._client.quote_type, required=True)
+            price = self._payload(self._client.price, required=True)
 
             info = {**quote_type, **profile, **detail, **key_stats, **financial, **price}
-            info["symbol"] = info.get("symbol") or self.ticker
+            info["symbol"] = info.get("symbol") or self.yahoo_symbol
             info["currentPrice"] = info.get("currentPrice") or info.get("regularMarketPrice")
             info["previousClose"] = info.get("previousClose") or info.get("regularMarketPreviousClose")
             self._info = info
@@ -95,14 +107,19 @@ class YahooQueryTicker:
         return _statement_to_wide_shape(self._client.income_statement(), "12M")
 
     def history(self, *args, **kwargs) -> pd.DataFrame:
-        return self._client.history(*args, **kwargs)
+        try:
+            return self._client.history(*args, **kwargs)
+        except KeyError as e:
+            if str(e).strip("'") != self.yahoo_symbol:
+                raise
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "adjclose"])
 
     def get_analyst_price_targets(self) -> dict:
-        financial = _get_symbol_payload(self._client.financial_data, self.ticker)
+        financial = self._payload(self._client.financial_data)
         return {key: financial.get(source_key) for key, source_key in _TARGET_KEYS.items()}
 
     def get_earnings_estimate(self) -> pd.DataFrame:
-        trend = _get_symbol_payload(self._client.earnings_trend, self.ticker).get("trend", [])
+        trend = self._payload(self._client.earnings_trend).get("trend", [])
         records = []
         for row in trend:
             estimate = row.get("earningsEstimate") or {}
@@ -124,7 +141,7 @@ class YahooQueryTicker:
         return recommendations if isinstance(recommendations, pd.DataFrame) else pd.DataFrame()
 
     def get_major_holders(self) -> pd.DataFrame:
-        holders = _get_symbol_payload(self._client.major_holders, self.ticker)
+        holders = self._payload(self._client.major_holders)
         return pd.DataFrame.from_dict(holders, orient="index", columns=["Value"])
 
     def get_insider_roster_holders(self) -> pd.DataFrame:

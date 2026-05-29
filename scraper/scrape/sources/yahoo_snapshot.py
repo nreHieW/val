@@ -35,7 +35,7 @@ def get_yahoo_snapshot(ticker: str) -> YahooSnapshot | None:
         quarterly_cashflow = normalize_quarterly_statement(yahoo_ticker.quarterly_cashflow)
         income_stmt = yahoo_ticker.income_stmt
     except Exception as e:
-        logger.warning("%s yahooquery snapshot skipped: %s", ticker, e)
+        logger.debug("%s yahooquery snapshot skipped: %s", ticker, e)
         return None
 
     return YahooSnapshot(
@@ -58,7 +58,7 @@ def get_yahoo_snapshots(tickers: list[str]) -> dict[str, YahooSnapshot]:
             try:
                 snapshot = future.result()
             except Exception as e:
-                logger.warning("%s yahooquery snapshot failed: %s", ticker, e)
+                logger.debug("%s yahooquery snapshot failed: %s", ticker, e)
                 continue
             if snapshot:
                 snapshots[ticker] = snapshot

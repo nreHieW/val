@@ -12,7 +12,6 @@ type MetricDefinition = (typeof METRICS)[number];
 
 type MetricGroup = {
   title: string;
-  description: string;
   metrics: MetricKey[];
   variant: "range" | "bar" | "diverging" | "dot";
 };
@@ -20,31 +19,26 @@ type MetricGroup = {
 const GROUPS: MetricGroup[] = [
   {
     title: "Market position",
-    description: "How close each company trades to its 52 week high.",
     metrics: ["pctOf52WeekHigh"],
     variant: "range",
   },
   {
     title: "Scale",
-    description: "Business size across revenue and operating earnings.",
     metrics: ["revenue", "netIncome", "ebitda", "ebit"],
     variant: "bar",
   },
   {
     title: "Profitability",
-    description: "Margin quality on a common percent scale.",
     metrics: ["netProfitMargin", "operatingMargin", "ebitdaMargin"],
     variant: "diverging",
   },
   {
     title: "Growth",
-    description: "Revenue and EBITDA growth, centered around zero.",
     metrics: ["revenueGrowth", "ebitdaGrowth"],
     variant: "diverging",
   },
   {
     title: "Valuation",
-    description: "Lower multiples generally indicate a cheaper peer.",
     metrics: ["pe", "forwardPe", "priceToSales", "priceToFcf", "evToEbitda", "evToSales"],
     variant: "dot",
   },
@@ -227,7 +221,7 @@ function DivergingMetric({
   const zero = valuePosition(0, min, max);
 
   return (
-    <MetricShell metric={metric} note="zero centered">
+    <MetricShell metric={metric}>
       <div className="space-y-3">
         {rows.map((row) => {
           const value = row[metric.key];
@@ -382,7 +376,6 @@ export default function PeerComparisonPanels({
           <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <h3 className="text-sm font-semibold tracking-tight text-foreground">{group.title}</h3>
-              <p className="mt-1 text-xs leading-5 text-muted-foreground">{group.description}</p>
             </div>
           </div>
           <div className="grid gap-3 lg:grid-cols-2">

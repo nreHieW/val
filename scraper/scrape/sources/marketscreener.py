@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from io import StringIO
 
@@ -10,7 +11,7 @@ import numpy as np
 import pandas as pd
 from bs4 import BeautifulSoup
 
-from scrape.core.config import JSON_LOCK, MARKETSCREENER_RETRIES, MARKETSCREENER_RETRY_SLEEP_SECONDS
+from scrape.core.config import JSON_LOCK, MARKETSCREENER_MAX_WORKERS, MARKETSCREENER_RETRIES, MARKETSCREENER_RETRY_SLEEP_SECONDS
 from scrape.core.http_utils import browser_get
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,8 @@ _MARKETSCREENER_CACHE_FILE = "marketscreener_links.json"
 _MARKETSCREENER_CACHE = {}
 _MARKETSCREENER_CACHE_LOADED = False
 _MARKETSCREENER_CACHE_DIRTY = False
+_MARKETSCREENER_IMPERSONATE = ("chrome124", "chrome120", "safari184")
+_MARKETSCREENER_SEMAPHORE = threading.BoundedSemaphore(MARKETSCREENER_MAX_WORKERS)
 
 
 def load_marketscreener_cache():
@@ -41,6 +44,20 @@ def save_marketscreener_cache():
         _MARKETSCREENER_CACHE_DIRTY = False
 
 
+def _marketscreener_search(ticker, query):
+    search_url = "https://www.marketscreener.com/search/?q=" + "+".join(query.split())
+    page = _marketscreener_get(search_url)
+    soup = BeautifulSoup(page.content, "lxml")
+    for row in soup.find_all("tr"):
+        ticker_tag = row.find("td", {"class": "txt-bold"})
+        currency_tag = row.find("span", {"class": "txt-muted"})
+        link_tag = row.find("a", href=True)
+        if ticker_tag and currency_tag and link_tag:
+            if ticker_tag.text.strip() == ticker and currency_tag.text.strip() == "USD":
+                return "https://www.marketscreener.com" + link_tag["href"]
+    return None
+
+
 def get_marketscreener_url(ticker, name: str = ""):
     global _MARKETSCREENER_CACHE_DIRTY
     load_marketscreener_cache()
@@ -49,33 +66,20 @@ def get_marketscreener_url(ticker, name: str = ""):
     if cached_link:
         return cached_link
 
-    search_url = "https://www.marketscreener.com/search/?q=" + "+".join(ticker.split())
-    page = _marketscreener_get(search_url)
-    soup = BeautifulSoup(page.content, "lxml")
-    rows = soup.find_all("tr")
-    found_link = None
-    for row in rows:
-        currency_tag = row.find("span", {"class": "txt-muted"})
-        if currency_tag:
-            currency = currency_tag.text.strip()
-            if currency == "USD" and row.find("td", {"class": "txt-bold"}).text.strip() == ticker:
-                link = row.find("a", href=True)["href"]
-                found_link = "https://www.marketscreener.com" + link
-                break
+    queries = [ticker]
+    if name:
+        queries.append(name)
 
-    if not found_link and name:
-        search_url = "https://www.marketscreener.com/search/?q=" + "+".join(name.split())
-        page = _marketscreener_get(search_url)
-        soup = BeautifulSoup(page.content, "lxml")
-        rows = soup.find_all("tr")
-        for row in rows:
-            currency_tag = row.find("span", {"class": "txt-muted"})
-            if currency_tag:
-                currency = currency_tag.text.strip()
-                if currency == "USD" and row.find("td", {"class": "txt-bold"}).text.strip() == ticker:
-                    link = row.find("a", href=True)["href"]
-                    found_link = "https://www.marketscreener.com" + link
-                    break
+    found_link = None
+    for attempt in range(MARKETSCREENER_RETRIES):
+        for query in queries:
+            found_link = _marketscreener_search(ticker, query)
+            if found_link:
+                break
+        if found_link or attempt == MARKETSCREENER_RETRIES - 1:
+            break
+        time.sleep(10 * (attempt + 1))
+
     if not found_link:
         logger.debug("Could not find %s on marketscreener", ticker)
     else:
@@ -90,7 +94,8 @@ def _marketscreener_get(url):
     last_error = None
     for attempt in range(MARKETSCREENER_RETRIES):
         try:
-            response = browser_get(url)
+            with _MARKETSCREENER_SEMAPHORE:
+                response = browser_get(url, impersonate=_MARKETSCREENER_IMPERSONATE[attempt % len(_MARKETSCREENER_IMPERSONATE)])
             response.raise_for_status()
             text = response.text.lower()
             if response.status_code in {403, 429, 503} or any(
@@ -106,27 +111,63 @@ def _marketscreener_get(url):
     raise last_error
 
 
+def _marketscreener_number(value):
+    if pd.isna(value):
+        return 0.0
+    if isinstance(value, (int, float, np.number)):
+        return float(value)
+
+    text = str(value).strip().replace(",", "")
+    if not text or text in {"-", "—"}:
+        return 0.0
+
+    multiplier = 1.0
+    suffix = text[-1].upper()
+    if suffix in {"T", "B", "M", "K"}:
+        multiplier = {"T": 1e12, "B": 1e9, "M": 1e6, "K": 1e3}[suffix]
+        text = text[:-1]
+
+    parsed = pd.to_numeric(text, errors="coerce")
+    return (0.0 if pd.isna(parsed) else float(parsed)) * multiplier
+
+
 def get_revenue_by_region(ticker, url):
     if not url:
         raise ValueError(f"No MarketScreener URL for {ticker}")
     page = _marketscreener_get(url + "company/")
     soup = BeautifulSoup(page.content, "lxml")
     df = None
-    for div in soup.find_all("div", {"class": "card mb-15 card--collapsible card--scrollable"}):
-        header_text = div.find("div", {"class": "card-header"}).text
-        if header_text == "Sales per region":
-            df = pd.read_html(str(div.find("table")))[0]
-            break
+    for div in soup.find_all("div", class_=lambda classes: classes and "card" in classes):
+        header = div.find("div", {"class": "card-header"}, recursive=False)
+        if not header:
+            continue
+        header_text = header.get_text(" ", strip=True).lower()
+        if header_text == "sales per region" or "geographical breakdown of sales" in header_text:
+            table = div.find("table")
+            if table:
+                df = pd.read_html(StringIO(str(table)))[0]
+                break
     if df is None:
         raise ValueError(f"No sales per region table for {ticker}")
-    countries = df[df.columns[0]].values
-    countries = [re.search(r"^([^\d]+)", item).group(0).strip() for item in countries]
-    df["country"] = countries
-    df.set_index("country", inplace=True)
-    numeric_col_names = [x for x in df.columns if x.isdigit()]
-    latest_year = max([int(x) for x in numeric_col_names])
-    df = df[numeric_col_names]
-    return df[str(latest_year)].to_dict()
+
+    country_col = df.columns[0]
+    countries = []
+    for item in df[country_col].astype(str).values:
+        match = re.search(r"^([^\d]+)", item)
+        countries.append(match.group(0).strip() if match else item.strip())
+
+    year_columns = {}
+    for column in df.columns[1:]:
+        match = re.search(r"\b(20\d{2}|19\d{2})\b", str(column))
+        if match:
+            year_columns[int(match.group(1))] = column
+    if not year_columns:
+        raise ValueError(f"No sales per region year columns for {ticker}")
+
+    latest_year = max(year_columns)
+    latest_col = year_columns[latest_year]
+    revenues = df[latest_col].apply(_marketscreener_number).values
+    return {country: float(revenue) for country, revenue in zip(countries, revenues)}
 
 
 def get_revenue_forecasts(url):

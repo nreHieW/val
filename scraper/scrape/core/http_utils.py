@@ -5,12 +5,33 @@ import time
 import numpy as np
 import requests
 from bs4 import BeautifulSoup
+from curl_cffi import requests as curl_requests
 
 from scrape.core.config import MAX_WORKERS, REQUEST_TIMEOUT_SECONDS, headers
 
 
+_SESSION_LOCAL = threading.local()
+
+
+def _requests_session():
+    session = getattr(_SESSION_LOCAL, "requests_session", None)
+    if session is None:
+        session = requests.Session()
+        session.headers.update(headers)
+        _SESSION_LOCAL.requests_session = session
+    return session
+
+
+def _browser_session():
+    session = getattr(_SESSION_LOCAL, "browser_session", None)
+    if session is None:
+        session = curl_requests.Session()
+        _SESSION_LOCAL.browser_session = session
+    return session
+
+
 def setup_proxies():
-    response = requests.get(
+    response = _requests_session().get(
         "https://www.sslproxies.org/",
         headers={
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.142 Safari/537.36"
@@ -41,12 +62,34 @@ def get_proxy():
     return {"http": PROXIES[idx], "https": PROXIES[idx]}
 
 
-def fetch_html(url, retries=2, sleep_seconds=10, use_proxy=False):
+def request_get(url, **kwargs):
+    request_headers = kwargs.pop("headers", headers)
+    return _requests_session().get(url, headers=request_headers, **kwargs)
+
+
+def browser_get(url, **kwargs):
+    """GET a page using a real browser TLS fingerprint.
+
+    Use this for sites that reject plain requests with bot-protection 403s.
+    """
+    request_headers = kwargs.pop("headers", headers)
+    return _browser_session().get(
+        url,
+        headers=request_headers,
+        impersonate=kwargs.pop("impersonate", "chrome124"),
+        timeout=kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS),
+        **kwargs,
+    )
+
+
+def fetch_html(url, retries=2, sleep_seconds=10, use_proxy=False, browser=False):
     last_error: Exception | None = None
     for attempt in range(retries):
         try:
             proxies = get_proxy() if use_proxy else None
-            return requests.get(url, headers=headers, proxies=proxies, timeout=REQUEST_TIMEOUT_SECONDS).text
+            if browser:
+                return browser_get(url, proxies=proxies).text
+            return _requests_session().get(url, proxies=proxies, timeout=REQUEST_TIMEOUT_SECONDS).text
         except Exception as e:
             last_error = e
             if attempt < retries - 1:
@@ -56,12 +99,12 @@ def fetch_html(url, retries=2, sleep_seconds=10, use_proxy=False):
     raise RuntimeError("fetch_html exhausted retries with no exception")
 
 
-def get_htmls(urls, use_proxy=False, workers=MAX_WORKERS):
+def get_htmls(urls, use_proxy=False, workers=MAX_WORKERS, browser=False):
     html_responses = []
     for i in range(0, len(urls), workers):
         batch = urls[i : i + workers]
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(batch))) as executor:
-            batch_htmls = list(executor.map(lambda u: fetch_html(u, use_proxy=use_proxy), batch))
+            batch_htmls = list(executor.map(lambda u: fetch_html(u, use_proxy=use_proxy, browser=browser), batch))
             html_responses.extend(batch_htmls)
         time.sleep(1)
     return html_responses

@@ -1,12 +1,12 @@
-import concurrent.futures
 import logging
 from dataclasses import dataclass
 
 import pandas as pd
+from yahooquery import Ticker
 
 from scrape.core.config import YAHOO_INFO_MAX_WORKERS
 from scrape.sources.yahoo_profiles import normalize_quarterly_statement
-from scrape.sources.yahooquery_adapter import YahooQueryTicker
+from scrape.sources.yahooquery_adapter import INFO_MODULES, YahooQueryTicker, statement_to_wide_shape
 
 logger = logging.getLogger(__name__)
 
@@ -51,17 +51,41 @@ def get_yahoo_snapshot(ticker: str) -> YahooSnapshot | None:
 
 def get_yahoo_snapshots(tickers: list[str]) -> dict[str, YahooSnapshot]:
     snapshots: dict[str, YahooSnapshot] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_INFO_MAX_WORKERS) as executor:
-        futures = {executor.submit(get_yahoo_snapshot, ticker): ticker for ticker in tickers}
-        for future in concurrent.futures.as_completed(futures):
-            ticker = futures[future]
+    for i in range(0, len(tickers), YAHOO_INFO_MAX_WORKERS):
+        batch = tickers[i : i + YAHOO_INFO_MAX_WORKERS]
+        yahoo_symbols = [ticker.replace(".", "-") for ticker in batch]
+        client = Ticker(yahoo_symbols, asynchronous=True)
+        modules = client.get_modules(INFO_MODULES)
+        quarterly_income = client.income_statement(frequency="q")
+        quarterly_balance = client.balance_sheet(frequency="q")
+        quarterly_cashflow = client.cash_flow(frequency="q")
+        annual_income = client.income_statement()
+
+        for ticker, yahoo_symbol in zip(batch, yahoo_symbols):
             try:
-                snapshot = future.result()
+                yahoo_ticker = YahooQueryTicker(
+                    ticker,
+                    modules=modules.get(yahoo_symbol) or modules.get(ticker),
+                    quarterly_income_stmt=normalize_quarterly_statement(
+                        statement_to_wide_shape(quarterly_income, "3M", yahoo_symbol)
+                    ),
+                    quarterly_balance_sheet=statement_to_wide_shape(quarterly_balance, "3M", yahoo_symbol),
+                    quarterly_cashflow=normalize_quarterly_statement(
+                        statement_to_wide_shape(quarterly_cashflow, "3M", yahoo_symbol)
+                    ),
+                    income_stmt=statement_to_wide_shape(annual_income, "12M", yahoo_symbol),
+                )
+                snapshots[ticker] = YahooSnapshot(
+                    ticker=ticker,
+                    yahoo_ticker=yahoo_ticker,
+                    info=yahoo_ticker.get_info(),
+                    quarterly_income_stmt=yahoo_ticker.quarterly_income_stmt,
+                    quarterly_balance_sheet=yahoo_ticker.quarterly_balance_sheet,
+                    quarterly_cashflow=yahoo_ticker.quarterly_cashflow,
+                    income_stmt=yahoo_ticker.income_stmt,
+                )
             except Exception as e:
-                logger.debug("%s yahooquery snapshot failed: %s", ticker, e)
-                continue
-            if snapshot:
-                snapshots[ticker] = snapshot
+                logger.debug("%s yahooquery snapshot skipped: %s", ticker, e)
 
     missing_count = len(tickers) - len(snapshots)
     if missing_count:

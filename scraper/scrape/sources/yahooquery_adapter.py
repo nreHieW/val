@@ -5,6 +5,18 @@ import pandas as pd
 from yahooquery import Ticker
 
 
+INFO_MODULES = [
+    "summaryProfile",
+    "summaryDetail",
+    "financialData",
+    "defaultKeyStatistics",
+    "quoteType",
+    "price",
+    "earningsTrend",
+    "recommendationTrend",
+    "majorHoldersBreakdown",
+    "insiderHolders",
+]
 _METADATA_COLUMNS = {"asOfDate", "periodType", "currencyCode"}
 _TARGET_KEYS = {
     "low": "targetLowPrice",
@@ -19,11 +31,15 @@ def _humanize_field(name: str) -> str:
     return re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", name)
 
 
-def _statement_to_wide_shape(df: pd.DataFrame, period_type: str) -> pd.DataFrame:
-    if df is None or df.empty:
+def statement_to_wide_shape(df: pd.DataFrame, period_type: str, yahoo_symbol: str | None = None) -> pd.DataFrame:
+    if not isinstance(df, pd.DataFrame) or df.empty:
         return pd.DataFrame()
 
     statement = df.copy()
+    if yahoo_symbol and isinstance(statement.index, pd.MultiIndex) and "symbol" in statement.index.names:
+        statement = statement.xs(yahoo_symbol, level="symbol", drop_level=False)
+    elif yahoo_symbol and statement.index.name == "symbol":
+        statement = statement.loc[[yahoo_symbol]] if yahoo_symbol in statement.index else statement.iloc[0:0]
     if "periodType" in statement.columns:
         statement = statement[statement["periodType"] == period_type]
     if statement.empty:
@@ -43,11 +59,29 @@ def get_yahooquery_info(symbol: str) -> dict:
 
 
 class YahooQueryTicker:
-    def __init__(self, symbol: str):
+    def __init__(
+        self,
+        symbol: str,
+        modules=None,
+        quarterly_income_stmt=None,
+        quarterly_balance_sheet=None,
+        quarterly_cashflow=None,
+        income_stmt=None,
+    ):
         self.ticker = symbol
         self.yahoo_symbol = symbol.replace(".", "-")
-        self._client = Ticker(self.yahoo_symbol)
+        self._client = None
+        self._modules = modules
         self._info = None
+        self._quarterly_income_stmt = quarterly_income_stmt
+        self._quarterly_balance_sheet = quarterly_balance_sheet
+        self._quarterly_cashflow = quarterly_cashflow
+        self._income_stmt = income_stmt
+
+    def _yq(self):
+        if self._client is None:
+            self._client = Ticker(self.yahoo_symbol, asynchronous=True)
+        return self._client
 
     def _payload(self, payload, *, required=False):
         if not isinstance(payload, dict):
@@ -74,16 +108,30 @@ class YahooQueryTicker:
             return {}
         return value or {}
 
+    def _module(self, modules: dict, name: str, *, required=False) -> dict:
+        value = modules.get(name, {})
+        if isinstance(value, dict):
+            return value
+        if required or "quote not found" in str(value).lower():
+            raise ValueError(f"Yahoo query failed for {self.ticker}: {value}")
+        return {}
+
     def get_info(self) -> dict:
         if self._info is None:
-            profile = self._payload(self._client.summary_profile)
-            detail = self._payload(self._client.summary_detail)
-            financial = self._payload(self._client.financial_data)
-            key_stats = self._payload(self._client.key_stats)
-            quote_type = self._payload(self._client.quote_type, required=True)
-            price = self._payload(self._client.price, required=True)
+            modules = self._modules if self._modules is not None else self._payload(self._yq().get_modules(INFO_MODULES), required=True)
+            quote_type = self._module(modules, "quoteType", required=True)
+            price = self._module(modules, "price", required=True)
+            if quote_type.get("quoteType") == "NONE":
+                raise ValueError(f"Yahoo query failed for {self.ticker}: quote not found")
 
-            info = {**quote_type, **profile, **detail, **key_stats, **financial, **price}
+            info = {
+                **quote_type,
+                **self._module(modules, "summaryProfile"),
+                **self._module(modules, "summaryDetail"),
+                **self._module(modules, "defaultKeyStatistics"),
+                **self._module(modules, "financialData"),
+                **price,
+            }
             info["symbol"] = info.get("symbol") or self.yahoo_symbol
             info["currentPrice"] = info.get("currentPrice") or info.get("regularMarketPrice")
             info["previousClose"] = info.get("previousClose") or info.get("regularMarketPreviousClose")
@@ -92,34 +140,45 @@ class YahooQueryTicker:
 
     @property
     def quarterly_income_stmt(self) -> pd.DataFrame:
-        return _statement_to_wide_shape(self._client.income_statement(frequency="q"), "3M")
+        if self._quarterly_income_stmt is None:
+            self._quarterly_income_stmt = statement_to_wide_shape(self._yq().income_statement(frequency="q"), "3M", self.yahoo_symbol)
+        return self._quarterly_income_stmt
 
     @property
     def quarterly_balance_sheet(self) -> pd.DataFrame:
-        return _statement_to_wide_shape(self._client.balance_sheet(frequency="q"), "3M")
+        if self._quarterly_balance_sheet is None:
+            self._quarterly_balance_sheet = statement_to_wide_shape(self._yq().balance_sheet(frequency="q"), "3M", self.yahoo_symbol)
+        return self._quarterly_balance_sheet
 
     @property
     def quarterly_cashflow(self) -> pd.DataFrame:
-        return _statement_to_wide_shape(self._client.cash_flow(frequency="q"), "3M")
+        if self._quarterly_cashflow is None:
+            self._quarterly_cashflow = statement_to_wide_shape(self._yq().cash_flow(frequency="q"), "3M", self.yahoo_symbol)
+        return self._quarterly_cashflow
 
     @property
     def income_stmt(self) -> pd.DataFrame:
-        return _statement_to_wide_shape(self._client.income_statement(), "12M")
+        if self._income_stmt is None:
+            self._income_stmt = statement_to_wide_shape(self._yq().income_statement(), "12M", self.yahoo_symbol)
+        return self._income_stmt
 
     def history(self, *args, **kwargs) -> pd.DataFrame:
         try:
-            return self._client.history(*args, **kwargs)
+            return self._yq().history(*args, **kwargs)
         except KeyError as e:
             if str(e).strip("'") != self.yahoo_symbol:
                 raise
             return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "adjclose"])
 
     def get_analyst_price_targets(self) -> dict:
-        financial = self._payload(self._client.financial_data)
-        return {key: financial.get(source_key) for key, source_key in _TARGET_KEYS.items()}
+        info = self.get_info()
+        return {key: info.get(source_key) for key, source_key in _TARGET_KEYS.items()}
 
     def get_earnings_estimate(self) -> pd.DataFrame:
-        trend = self._payload(self._client.earnings_trend).get("trend", [])
+        if self._modules is not None:
+            trend = self._module(self._modules, "earningsTrend").get("trend", [])
+        else:
+            trend = self._payload(self._yq().earnings_trend).get("trend", [])
         records = []
         for row in trend:
             estimate = row.get("earningsEstimate") or {}
@@ -137,15 +196,22 @@ class YahooQueryTicker:
         return pd.DataFrame(records)
 
     def get_recommendations_summary(self) -> pd.DataFrame:
-        recommendations = self._client.recommendation_trend
+        if self._modules is not None:
+            return pd.DataFrame(self._module(self._modules, "recommendationTrend").get("trend", []))
+        recommendations = self._yq().recommendation_trend
         return recommendations if isinstance(recommendations, pd.DataFrame) else pd.DataFrame()
 
     def get_major_holders(self) -> pd.DataFrame:
-        holders = self._payload(self._client.major_holders)
+        if self._modules is not None:
+            holders = self._module(self._modules, "majorHoldersBreakdown")
+        else:
+            holders = self._payload(self._yq().major_holders)
         return pd.DataFrame.from_dict(holders, orient="index", columns=["Value"])
 
     def get_insider_roster_holders(self) -> pd.DataFrame:
-        holders = self._client.insider_holders
+        if self._modules is not None:
+            return pd.DataFrame(self._module(self._modules, "insiderHolders").get("holders", []))
+        holders = self._yq().insider_holders
         return holders if isinstance(holders, pd.DataFrame) else pd.DataFrame()
 
 

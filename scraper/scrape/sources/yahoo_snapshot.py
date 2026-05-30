@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import pandas as pd
 from yahooquery import Ticker
 
-from scrape.core.config import YAHOO_INFO_MAX_WORKERS
+from scrape.core.config import YAHOOQUERY_BATCH_SIZE
 from scrape.sources.yahoo_profiles import normalize_quarterly_statement
 from scrape.sources.yahooquery_adapter import INFO_MODULES, YahooQueryTicker, statement_to_wide_shape
 
@@ -51,8 +51,8 @@ def get_yahoo_snapshot(ticker: str) -> YahooSnapshot | None:
 
 def get_yahoo_snapshots(tickers: list[str]) -> dict[str, YahooSnapshot]:
     snapshots: dict[str, YahooSnapshot] = {}
-    for i in range(0, len(tickers), YAHOO_INFO_MAX_WORKERS):
-        batch = tickers[i : i + YAHOO_INFO_MAX_WORKERS]
+    for i in range(0, len(tickers), YAHOOQUERY_BATCH_SIZE):
+        batch = tickers[i : i + YAHOOQUERY_BATCH_SIZE]
         yahoo_symbols = [ticker.replace(".", "-") for ticker in batch]
         client = Ticker(yahoo_symbols, asynchronous=True)
         modules = client.get_modules(INFO_MODULES)

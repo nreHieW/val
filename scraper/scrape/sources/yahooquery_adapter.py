@@ -60,6 +60,7 @@ class YahooQueryTicker:
         quarterly_balance_sheet=None,
         quarterly_cashflow=None,
         income_stmt=None,
+        history=None,
     ):
         self.ticker = symbol
         self.yahoo_symbol = symbol.replace(".", "-")
@@ -70,6 +71,7 @@ class YahooQueryTicker:
         self._quarterly_balance_sheet = quarterly_balance_sheet
         self._quarterly_cashflow = quarterly_cashflow
         self._income_stmt = income_stmt
+        self._history = history
 
     def _yq(self):
         if self._client is None:
@@ -156,6 +158,8 @@ class YahooQueryTicker:
         return self._income_stmt
 
     def history(self, *args, **kwargs) -> pd.DataFrame:
+        if self._history is not None:
+            return self._history
         try:
             return self._yq().history(*args, **kwargs)
         except KeyError as e:

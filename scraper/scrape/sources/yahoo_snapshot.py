@@ -21,6 +21,16 @@ class YahooSnapshot:
     quarterly_balance_sheet: pd.DataFrame
     quarterly_cashflow: pd.DataFrame
     income_stmt: pd.DataFrame
+    history: pd.DataFrame
+
+
+def _history_for_symbol(history: pd.DataFrame, yahoo_symbol: str) -> pd.DataFrame:
+    if not isinstance(history, pd.DataFrame) or history.empty or not isinstance(history.index, pd.MultiIndex):
+        return pd.DataFrame()
+    if yahoo_symbol not in history.index.get_level_values(0):
+        return pd.DataFrame()
+    return history.xs(yahoo_symbol, level=0, drop_level=False)
+
 
 def get_yahoo_snapshots(tickers: list[str]) -> dict[str, YahooSnapshot]:
     snapshots: dict[str, YahooSnapshot] = {}
@@ -34,12 +44,14 @@ def get_yahoo_snapshots(tickers: list[str]) -> dict[str, YahooSnapshot]:
             quarterly_balance_future = executor.submit(client.balance_sheet, frequency="q")
             quarterly_cashflow_future = executor.submit(client.cash_flow, frequency="q")
             annual_income_future = executor.submit(client.income_statement)
+            history_future = executor.submit(client.history, period="1y", interval="1d")
 
             modules = modules_future.result()
             quarterly_income = quarterly_income_future.result()
             quarterly_balance = quarterly_balance_future.result()
             quarterly_cashflow = quarterly_cashflow_future.result()
             annual_income = annual_income_future.result()
+            history = history_future.result()
 
         for ticker, yahoo_symbol in zip(batch, yahoo_symbols):
             try:
@@ -54,6 +66,7 @@ def get_yahoo_snapshots(tickers: list[str]) -> dict[str, YahooSnapshot]:
                         statement_to_wide_shape(quarterly_cashflow, "3M", yahoo_symbol)
                     ),
                     income_stmt=statement_to_wide_shape(annual_income, "12M", yahoo_symbol),
+                    history=_history_for_symbol(history, yahoo_symbol),
                 )
                 snapshots[ticker] = YahooSnapshot(
                     ticker=ticker,
@@ -63,6 +76,7 @@ def get_yahoo_snapshots(tickers: list[str]) -> dict[str, YahooSnapshot]:
                     quarterly_balance_sheet=yahoo_ticker.quarterly_balance_sheet,
                     quarterly_cashflow=yahoo_ticker.quarterly_cashflow,
                     income_stmt=yahoo_ticker.income_stmt,
+                    history=yahoo_ticker.history(),
                 )
             except Exception as e:
                 logger.debug("%s yahooquery snapshot skipped: %s", ticker, e)

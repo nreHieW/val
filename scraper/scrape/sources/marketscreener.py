@@ -10,25 +10,14 @@ import numpy as np
 import pandas as pd
 from bs4 import BeautifulSoup
 
-from scrape.core.config import (
-    JSON_LOCK,
-    MARKETSCREENER_JITTER_SECONDS,
-    MARKETSCREENER_MIN_INTERVAL_SECONDS,
-    MARKETSCREENER_RETRIES,
-    MARKETSCREENER_RETRY_SLEEP_SECONDS,
-)
+from scrape.core.config import JSON_LOCK, MARKETSCREENER_RETRIES, MARKETSCREENER_RETRY_SLEEP_SECONDS
 from scrape.core.http_utils import browser_get
-from scrape.core.rate_limit import RateLimiter
 
 logger = logging.getLogger(__name__)
 _MARKETSCREENER_CACHE_FILE = "marketscreener_links.json"
 _MARKETSCREENER_CACHE = {}
 _MARKETSCREENER_CACHE_LOADED = False
 _MARKETSCREENER_CACHE_DIRTY = False
-_MARKETSCREENER_RATE_LIMITER = RateLimiter(
-    MARKETSCREENER_MIN_INTERVAL_SECONDS,
-    MARKETSCREENER_JITTER_SECONDS,
-)
 
 
 def load_marketscreener_cache():
@@ -101,7 +90,6 @@ def _marketscreener_get(url):
     last_error = None
     for attempt in range(MARKETSCREENER_RETRIES):
         try:
-            _MARKETSCREENER_RATE_LIMITER.wait()
             response = browser_get(url)
             response.raise_for_status()
             text = response.text.lower()

@@ -213,7 +213,7 @@ def run_comps_scrape(tickers, client, cached_yahoo_profiles=None, yahoo_snapshot
 
 def main():
     started = time.monotonic()
-    tickers = get_all_tickers()[:1000]
+    tickers = get_all_tickers()[:400]
     logger.info("Tickers loaded: %s", len(tickers))
     client = get_mongo_client()
     load_marketscreener_cache()

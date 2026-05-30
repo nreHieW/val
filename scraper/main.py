@@ -255,7 +255,7 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
             info, yahoo_profile, yahoo_overview = _fallback_yahoo_profile(ticker, yahoo_snapshot)
 
             if info.get("quoteType") == "EQUITY" and info.get("marketCap"):
-                logger.warning("%s has quote/profile data but no statements", ticker)
+                # logger.warning("%s has quote/profile data but no statements", ticker)
                 return False, None, yahoo_profile, yahoo_overview, "yahoo_statement_failure"
 
             return False, None, yahoo_profile, yahoo_overview, "skipped:missing_financial_statements"

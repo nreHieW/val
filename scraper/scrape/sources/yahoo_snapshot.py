@@ -1,3 +1,4 @@
+import concurrent.futures
 import logging
 from dataclasses import dataclass
 
@@ -55,11 +56,18 @@ def get_yahoo_snapshots(tickers: list[str]) -> dict[str, YahooSnapshot]:
         batch = tickers[i : i + YAHOOQUERY_BATCH_SIZE]
         yahoo_symbols = [ticker.replace(".", "-") for ticker in batch]
         client = Ticker(yahoo_symbols, asynchronous=True)
-        modules = client.get_modules(INFO_MODULES)
-        quarterly_income = client.income_statement(frequency="q")
-        quarterly_balance = client.balance_sheet(frequency="q")
-        quarterly_cashflow = client.cash_flow(frequency="q")
-        annual_income = client.income_statement()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            modules_future = executor.submit(client.get_modules, INFO_MODULES)
+            quarterly_income_future = executor.submit(client.income_statement, frequency="q")
+            quarterly_balance_future = executor.submit(client.balance_sheet, frequency="q")
+            quarterly_cashflow_future = executor.submit(client.cash_flow, frequency="q")
+            annual_income_future = executor.submit(client.income_statement)
+
+            modules = modules_future.result()
+            quarterly_income = quarterly_income_future.result()
+            quarterly_balance = quarterly_balance_future.result()
+            quarterly_cashflow = quarterly_cashflow_future.result()
+            annual_income = annual_income_future.result()
 
         for ticker, yahoo_symbol in zip(batch, yahoo_symbols):
             try:

@@ -1,18 +1,20 @@
 import concurrent.futures
 import logging
 import time
+from functools import lru_cache
 
 import pandas as pd
 
 from scrape.core.config import YAHOO_INFO_MAX_WORKERS
 from scrape.sources.sec_companyfacts import get_sec_ttm_financials
-from scrape.sources.yahooquery_adapter import YahooQueryTicker, get_yahooquery_info
+from scrape.sources.yahooquery_adapter import YahooQueryTicker
 
 logger = logging.getLogger(__name__)
 
 
+@lru_cache(maxsize=10000)
 def get_yahoo_info(ticker):
-    return get_yahooquery_info(ticker)
+    return YahooQueryTicker(ticker).get_info()
 
 
 def build_yahoo_profile(ticker, ticker_info):
@@ -175,15 +177,6 @@ def compute_ttm_financials(tickers, yahoo_snapshots=None):
     return pd.DataFrame(ordered_financials).set_index("Ticker")
 
 
-def get_info(ticker):
-    try:
-        ticker_info = get_yahoo_info(ticker)
-        return build_yahoo_profile(ticker, ticker_info)
-    except Exception as e:
-        logger.debug("%s profile skipped: %s", ticker, e)
-        return None
-
-
 def get_and_parse_yahoo(tickers, cached_profiles=None, yahoo_snapshots=None):
     cached_profiles = cached_profiles or {}
     yahoo_snapshots = yahoo_snapshots or {}
@@ -203,10 +196,17 @@ def get_and_parse_yahoo(tickers, cached_profiles=None, yahoo_snapshots=None):
         for i in range(0, len(missing_tickers), YAHOO_INFO_MAX_WORKERS):
             batch = missing_tickers[i : i + YAHOO_INFO_MAX_WORKERS]
             with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_INFO_MAX_WORKERS) as executor:
-                results = list(executor.map(get_info, batch))
-            for result in results:
-                if result:
-                    profiles_by_ticker[result["Ticker"]] = result
+                futures = {executor.submit(get_yahoo_info, ticker): ticker for ticker in batch}
+                for future in concurrent.futures.as_completed(futures):
+                    ticker = futures[future]
+                    try:
+                        ticker_info = future.result()
+                    except Exception as e:
+                        logger.debug("%s profile skipped: %s", ticker, e)
+                        continue
+                    if ticker_info:
+                        profile = build_yahoo_profile(ticker, ticker_info)
+                        profiles_by_ticker[profile["Ticker"]] = profile
 
             if i + YAHOO_INFO_MAX_WORKERS < len(missing_tickers):
                 time.sleep(1)

@@ -13,7 +13,6 @@ from scrape.core.http_utils import run_with_timeout
 from scrape.core.json_util import CustomEncoder
 from scrape.core.mongo import get_mongo_client
 from scrape.core.tickers import get_all_tickers
-from scrape.sources.finviz import parse_finviz
 from scrape.sources.marketscreener import load_marketscreener_cache, save_marketscreener_cache
 from scrape.sources.yahoo_market_discovery import get_sector_industries, get_similar_companies
 from scrape.sources.yahoo_overview import build_yahoo_overview
@@ -177,9 +176,8 @@ def run_market_discovery_scrape(tickers, client, yahoo_snapshots=None):
 def run_comps_scrape(tickers, client, cached_yahoo_profiles=None, yahoo_snapshots=None):
     yahoo_df = get_and_parse_yahoo(tickers, cached_profiles=cached_yahoo_profiles, yahoo_snapshots=yahoo_snapshots)
     ttm_financials_df = compute_ttm_financials(tickers, yahoo_snapshots=yahoo_snapshots)
-    finviz_df = parse_finviz(tickers)
 
-    combined = pd.concat([yahoo_df, ttm_financials_df, finviz_df], axis=1, join="outer")
+    combined = pd.concat([yahoo_df, ttm_financials_df], axis=1, join="outer")
     combined = combined.astype(object).where(pd.notna(combined), None)
     combined.reset_index(inplace=True)
     combined = combined.rename(columns={"index": "Ticker"})
@@ -252,12 +250,7 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
         return False, None, None, None, "timeout"
     except MissingFinancialStatements:
         try:
-            info, yahoo_profile, yahoo_overview = _fallback_yahoo_profile(ticker, yahoo_snapshot)
-
-            if info.get("quoteType") == "EQUITY" and info.get("marketCap"):
-                # logger.warning("%s has quote/profile data but no statements", ticker)
-                return False, None, yahoo_profile, yahoo_overview, "yahoo_statement_failure"
-
+            _, yahoo_profile, yahoo_overview = _fallback_yahoo_profile(ticker, yahoo_snapshot)
             return False, None, yahoo_profile, yahoo_overview, "skipped:missing_financial_statements"
         except Exception:
             logger.debug("Yahoo fallback failed for %s\n%s", ticker, traceback.format_exc())

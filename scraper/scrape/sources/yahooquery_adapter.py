@@ -1,6 +1,4 @@
 import re
-from functools import lru_cache
-
 import pandas as pd
 from yahooquery import Ticker
 
@@ -51,11 +49,6 @@ def statement_to_wide_shape(df: pd.DataFrame, period_type: str, yahoo_symbol: st
     value_columns = [column for column in statement.columns if column not in _METADATA_COLUMNS]
     statement = statement[value_columns].rename(columns=_humanize_field)
     return statement.T
-
-
-@lru_cache(maxsize=10000)
-def get_yahooquery_info(symbol: str) -> dict:
-    return YahooQueryTicker(symbol).get_info()
 
 
 class YahooQueryTicker:

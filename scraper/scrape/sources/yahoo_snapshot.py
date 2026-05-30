@@ -22,34 +22,6 @@ class YahooSnapshot:
     quarterly_cashflow: pd.DataFrame
     income_stmt: pd.DataFrame
 
-    @property
-    def symbol(self) -> str:
-        return self.info.get("symbol") or self.ticker
-
-
-def get_yahoo_snapshot(ticker: str) -> YahooSnapshot | None:
-    yahoo_ticker = YahooQueryTicker(ticker)
-    try:
-        info = yahoo_ticker.get_info()
-        quarterly_income_stmt = normalize_quarterly_statement(yahoo_ticker.quarterly_income_stmt)
-        quarterly_balance_sheet = yahoo_ticker.quarterly_balance_sheet
-        quarterly_cashflow = normalize_quarterly_statement(yahoo_ticker.quarterly_cashflow)
-        income_stmt = yahoo_ticker.income_stmt
-    except Exception as e:
-        logger.debug("%s yahooquery snapshot skipped: %s", ticker, e)
-        return None
-
-    return YahooSnapshot(
-        ticker=ticker,
-        yahoo_ticker=yahoo_ticker,
-        info=info,
-        quarterly_income_stmt=quarterly_income_stmt,
-        quarterly_balance_sheet=quarterly_balance_sheet,
-        quarterly_cashflow=quarterly_cashflow,
-        income_stmt=income_stmt,
-    )
-
-
 def get_yahoo_snapshots(tickers: list[str]) -> dict[str, YahooSnapshot]:
     snapshots: dict[str, YahooSnapshot] = {}
     for i in range(0, len(tickers), YAHOOQUERY_BATCH_SIZE):

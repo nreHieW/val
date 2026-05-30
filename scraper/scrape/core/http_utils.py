@@ -73,7 +73,8 @@ def browser_get(url, **kwargs):
     Use this for sites that reject plain requests with bot-protection 403s.
     """
     request_headers = kwargs.pop("headers", headers)
-    return _browser_session().get(
+    session = curl_requests.Session() if kwargs.pop("fresh_session", False) else _browser_session()
+    return session.get(
         url,
         headers=request_headers,
         impersonate=kwargs.pop("impersonate", "chrome124"),

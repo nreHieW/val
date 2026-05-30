@@ -71,14 +71,10 @@ def get_marketscreener_url(ticker, name: str = ""):
         queries.append(name)
 
     found_link = None
-    for attempt in range(MARKETSCREENER_RETRIES):
-        for query in queries:
-            found_link = _marketscreener_search(ticker, query)
-            if found_link:
-                break
-        if found_link or attempt == MARKETSCREENER_RETRIES - 1:
+    for query in queries:
+        found_link = _marketscreener_search(ticker, query)
+        if found_link:
             break
-        time.sleep(10 * (attempt + 1))
 
     if not found_link:
         logger.debug("Could not find %s on marketscreener", ticker)
@@ -95,7 +91,11 @@ def _marketscreener_get(url):
     for attempt in range(MARKETSCREENER_RETRIES):
         try:
             with _MARKETSCREENER_SEMAPHORE:
-                response = browser_get(url, impersonate=_MARKETSCREENER_IMPERSONATE[attempt % len(_MARKETSCREENER_IMPERSONATE)])
+                response = browser_get(
+                    url,
+                    impersonate=_MARKETSCREENER_IMPERSONATE[attempt % len(_MARKETSCREENER_IMPERSONATE)],
+                    fresh_session=True,
+                )
             response.raise_for_status()
             text = response.text.lower()
             if response.status_code in {403, 429, 503} or any(

@@ -8,6 +8,7 @@ import {
   DcfInput,
   fillNaNWithEmptyString,
   rAndDAdjustment,
+  reverseDcf,
 } from "@/lib/dcf";
 
 const ABS_TOLERANCE = 1e-9;
@@ -125,7 +126,29 @@ describe("dcf negative operating margin handling", () => {
       "negative margin produces negative operating income",
     );
     expectNumericClose(nextYear.taxes, 0, "operating loss has no current tax");
-    expect(nextYear.nol).toBeGreaterThan(0);
+    expect(nextYear.nol > 0).toBe(true);
+  });
+});
+
+describe("reverse dcf", () => {
+  test("solves implied revenue CAGR that reproduces current price", () => {
+    const baseInputs = dcfFixture.cases[0].inputs as DcfInput;
+    const output = reverseDcf(baseInputs);
+
+    expect(output.target_price).toBe(baseInputs.curr_price);
+    expect(output.implied_revenue_cagr.implied_value != null).toBe(true);
+
+    const cagrValue = dcf({
+      ...baseInputs,
+      compounded_annual_revenue_growth_rate: output.implied_revenue_cagr.implied_value!,
+    }).value_per_share;
+    expectNumericClose(cagrValue, baseInputs.curr_price, "implied CAGR value");
+    expectNumericClose(
+      output.implied_revenue_cagr.validation_value_per_share!,
+      baseInputs.curr_price,
+      "implied CAGR validation",
+    );
+
   });
 });
 

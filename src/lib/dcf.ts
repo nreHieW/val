@@ -74,6 +74,17 @@ export type DcfOutput = {
   final_components: DcfFinalComponents;
 };
 
+export type ReverseDcfScenario = {
+  implied_value: number | null;
+  validation_value_per_share: number | null;
+  validation_error: number | null;
+};
+
+export type ReverseDcfOutput = {
+  target_price: number;
+  implied_revenue_cagr: ReverseDcfScenario;
+};
+
 function linspace(start: number, end: number, count: number): number[] {
   if (count <= 0) return [];
   if (count === 1) return [start];
@@ -367,6 +378,63 @@ export function dcf(input: DcfInput): DcfOutput {
         input.cross_holdings_and_other_non_operating_assets,
       minority_interest: input.minority_interest,
     },
+  };
+}
+
+const REVERSE_DCF_MIN_CAGR = -0.95;
+const REVERSE_DCF_MAX_CAGR = 1.5;
+const REVERSE_DCF_TOLERANCE = 1e-8;
+
+function emptyReverseDcfScenario(): ReverseDcfScenario {
+  return { implied_value: null, validation_value_per_share: null, validation_error: null };
+}
+
+function valuePerShareAtCagr(input: DcfInput, cagr: number) {
+  return dcf({ ...input, compounded_annual_revenue_growth_rate: cagr }).value_per_share;
+}
+
+function solveImpliedRevenueCagr(input: DcfInput): ReverseDcfScenario {
+  const targetPrice = input.curr_price;
+  if (!Number.isFinite(targetPrice)) return emptyReverseDcfScenario();
+
+  let low = REVERSE_DCF_MIN_CAGR;
+  let high = REVERSE_DCF_MAX_CAGR;
+  let lowDiff = valuePerShareAtCagr(input, low) - targetPrice;
+  const highDiff = valuePerShareAtCagr(input, high) - targetPrice;
+
+  if (Math.abs(lowDiff) <= REVERSE_DCF_TOLERANCE) {
+    return { implied_value: low, validation_value_per_share: targetPrice + lowDiff, validation_error: lowDiff };
+  }
+  if (Math.abs(highDiff) <= REVERSE_DCF_TOLERANCE) {
+    return { implied_value: high, validation_value_per_share: targetPrice + highDiff, validation_error: highDiff };
+  }
+  if (lowDiff * highDiff > 0) return emptyReverseDcfScenario();
+
+  let implied = input.compounded_annual_revenue_growth_rate;
+  for (let i = 0; i < 100; i += 1) {
+    implied = (low + high) / 2;
+    const diff = valuePerShareAtCagr(input, implied) - targetPrice;
+    if (Math.abs(diff) <= REVERSE_DCF_TOLERANCE) break;
+    if (lowDiff * diff <= 0) {
+      high = implied;
+    } else {
+      low = implied;
+      lowDiff = diff;
+    }
+  }
+
+  const validationValue = valuePerShareAtCagr(input, implied);
+  return {
+    implied_value: implied,
+    validation_value_per_share: validationValue,
+    validation_error: validationValue - targetPrice,
+  };
+}
+
+export function reverseDcf(input: DcfInput): ReverseDcfOutput {
+  return {
+    target_price: input.curr_price,
+    implied_revenue_cagr: solveImpliedRevenueCagr(input),
   };
 }
 

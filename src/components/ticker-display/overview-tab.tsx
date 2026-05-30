@@ -1,4 +1,5 @@
-import { EpsEstimate, TickerOverview } from "./types";
+import { DcfRow, ReverseDcfOutput } from "@/lib/dcf";
+import { DCFInputData, EpsEstimate, TickerOverview } from "./types";
 
 function formatCompactMoney(value: number | null | undefined, decimals = 2) {
   if (value == null || !Number.isFinite(value)) return "-";
@@ -25,6 +26,13 @@ function formatSignedPercent(value: number | null | undefined, decimals = 1) {
   return `${sign}${(value * 100).toFixed(decimals)}%`;
 }
 
+function formatValidation(value: number | null | undefined, target: number | null | undefined) {
+  if (value == null || target == null || !Number.isFinite(value) || !Number.isFinite(target)) {
+    return "No solution in range";
+  }
+  return `validates to ${formatCompactMoney(value)} vs ${formatCompactMoney(target)}`;
+}
+
 function truncateSummary(summary: string | null | undefined) {
   if (!summary) return "No company description is available yet.";
   if (summary.length <= 800) return summary;
@@ -43,10 +51,12 @@ function Metric({
   label,
   value,
   tone,
+  detail,
 }: {
   label: string;
   value: string;
   tone?: "positive" | "negative";
+  detail?: string;
 }) {
   return (
     <div className="min-w-0">
@@ -62,6 +72,7 @@ function Metric({
       >
         {value}
       </p>
+      {detail && <p className="mt-1 truncate text-xxs text-muted-foreground/50">{detail}</p>}
     </div>
   );
 }
@@ -96,9 +107,15 @@ function EpsRow({ label, estimate }: { label: string; estimate?: EpsEstimate | n
 export default function OverviewTab({
   overview,
   valuePerShare,
+  dcfInputs,
+  dcfRows,
+  reverseDcf,
 }: {
   overview: TickerOverview | null;
   valuePerShare?: number | null;
+  dcfInputs?: DCFInputData | null;
+  dcfRows?: DcfRow[] | null;
+  reverseDcf?: ReverseDcfOutput | null;
 }) {
   if (!overview) {
     return (
@@ -121,6 +138,8 @@ export default function OverviewTab({
     dcfPct = (currentPrice / valuePerShare) * 100;
   }
   const recommendations = overview.analyst?.recommendations?.current;
+  const nextYearRow = dcfRows?.[1];
+  const terminalRow = dcfRows?.[dcfRows.length - 1];
   const buyRatings = (recommendations?.strongBuy ?? 0) + (recommendations?.buy ?? 0);
   const totalRatings =
     buyRatings +
@@ -192,6 +211,54 @@ export default function OverviewTab({
           </div>
         )}
       </section>
+
+      <div className="grid gap-5 lg:grid-cols-2">
+        <Section title="Model Quality & Forecasts">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Metric
+              label="ROIC (next year)"
+              value={formatPercent(nextYearRow?.roic)}
+              detail={terminalRow ? `terminal ${formatPercent(terminalRow.roic)}` : undefined}
+            />
+            <Metric
+              label="Revenue Growth (next year)"
+              value={formatPercent(dcfInputs?.revenue_growth_rate_next_year)}
+              detail="scraped / consensus forecast"
+            />
+            <Metric
+              label="Revenue CAGR"
+              value={formatPercent(dcfInputs?.compounded_annual_revenue_growth_rate)}
+              detail={`${dcfInputs?.years_of_high_growth ?? "-"} high-growth years`}
+            />
+            <Metric
+              label="Operating Margin"
+              value={formatPercent(dcfInputs?.operating_margin_next_year)}
+              detail={`target ${formatPercent(dcfInputs?.target_pre_tax_operating_margin)}`}
+            />
+          </div>
+        </Section>
+
+        <Section title="Reverse DCF (price-implied)">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Metric
+              label="Implied Revenue CAGR"
+              value={formatPercent(reverseDcf?.implied_revenue_cagr.implied_value)}
+              detail={formatValidation(
+                reverseDcf?.implied_revenue_cagr.validation_value_per_share,
+                reverseDcf?.target_price,
+              )}
+            />
+            <Metric
+              label="Operating Margin Held At"
+              value={formatPercent(dcfInputs?.target_pre_tax_operating_margin)}
+              detail="scraped/default DCF margin"
+            />
+          </div>
+          <p className="mt-4 border-t border-border/40 pt-3 text-xxs leading-4 text-muted-foreground/60">
+            Revenue CAGR is the only solved variable. Operating margin stays at the scraped/default DCF value, so entering the implied CAGR into the DCF form validates back to the current stock price.
+          </p>
+        </Section>
+      </div>
 
       <div className="grid gap-5 lg:grid-cols-2">
         <Section title="Valuation">

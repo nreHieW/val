@@ -10,6 +10,7 @@ import {
 } from "./dataHelpers";
 import CardItem from "./card-item";
 import InputForm from "./input-form";
+import { DcfInput, reverseDcf } from "@/lib/dcf";
 import { DCFInputData, UserDCFInputs } from "./types";
 import InfoHover from "../info-hover";
 import OverviewTab from "./overview-tab";
@@ -37,12 +38,21 @@ export default async function TickerDisplay({
   const { value_per_share, df, cost_of_capital_components, final_components } =
     dcfOutput!;
   const terminalData = df[df.length - 1];
+  const reverseDcfOutput = reverseDcf(dcfInputs as DcfInput);
   const incomeStatementData = createIncomeStatementData(df);
   const revenues = df.map((item: any) => formatAmount(item.revenues));
   return (
     <TickerDisplayTabs
       ticker={ticker}
-      overview={<OverviewTab overview={overview} valuePerShare={value_per_share} />}
+      overview={
+        <OverviewTab
+          overview={overview}
+          valuePerShare={value_per_share}
+          dcfInputs={dcfInputs}
+          dcfRows={df}
+          reverseDcf={reverseDcfOutput}
+        />
+      }
     >
       <div className="space-y-0">
         <TopCard

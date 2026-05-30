@@ -8,7 +8,7 @@ import traceback
 import pandas as pd
 from pymongo import UpdateOne
 
-from scrape.core.config import DCF_MAX_WORKERS, TICKER_TIMEOUT_SECONDS
+from scrape.core.config import DCF_MAX_WORKERS, MARKETSCREENER_MAX_WORKERS, TICKER_TIMEOUT_SECONDS
 from scrape.core.http_utils import run_with_timeout
 from scrape.core.json_util import CustomEncoder
 from scrape.core.mongo import get_mongo_client
@@ -42,6 +42,14 @@ def _log_timing(label, fn, *args, **kwargs):
         logger.info("%s completed in %.1fs", label, time.monotonic() - started)
 
 
+def marketscreener_forecast_failed(record):
+    return bool(
+        ((record.get("extras") or {}).get("forecast_context") or {}).get(
+            "marketscreener_forecast_error"
+        )
+    )
+
+
 def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
     yahoo_snapshots = yahoo_snapshots or {}
     logger.info(f"Running DCF scrape for {len(tickers)} tickers")
@@ -62,8 +70,9 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
     yahoo_profiles = {}
     yahoo_overviews = {}
     dcf_records = []
+    marketscreener_forecast_failures = 0
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=DCF_MAX_WORKERS) as executor, concurrent.futures.ThreadPoolExecutor(max_workers=DCF_MAX_WORKERS * 2) as marketscreener_executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=DCF_MAX_WORKERS) as executor, concurrent.futures.ThreadPoolExecutor(max_workers=MARKETSCREENER_MAX_WORKERS) as marketscreener_executor:
         for i in range(0, len(tickers), DCF_MAX_WORKERS):
             logger.info(f"Processing batch {i // DCF_MAX_WORKERS + 1} of {(len(tickers) + DCF_MAX_WORKERS - 1) // DCF_MAX_WORKERS}")
             batch = tickers[i : i + DCF_MAX_WORKERS]
@@ -87,7 +96,10 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
                 ticker = futures[future]
                 success, dcf_inputs, yahoo_profile, yahoo_overview, failure_reason = future.result()
                 if dcf_inputs:
-                    dcf_records.append((ticker, dcf_inputs))
+                    if marketscreener_forecast_failed(dcf_inputs):
+                        marketscreener_forecast_failures += 1
+                    else:
+                        dcf_records.append((ticker, dcf_inputs))
                 if yahoo_profile:
                     yahoo_profiles[yahoo_profile["Ticker"]] = yahoo_profile
                 if yahoo_overview:
@@ -108,6 +120,11 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
         logger.info("DCF skipped summary: %s", ", ".join(f"{reason}: {count}" for reason, count in sorted(skipped_counts.items())))
     if failure_counts:
         logger.warning("DCF failure summary: %s", ", ".join(f"{reason}: {count}" for reason, count in sorted(failure_counts.items())))
+    if marketscreener_forecast_failures:
+        logger.warning(
+            "MarketScreener forecast failures: %s tickers skipped from DCF DB update",
+            marketscreener_forecast_failures,
+        )
 
     dcf_operations = [UpdateOne({"Ticker": ticker}, {"$set": record}, upsert=True) for ticker, record in dcf_records]
     if dcf_operations:

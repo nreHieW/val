@@ -338,10 +338,12 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
         except Exception as e:
             logger.debug("%s regional revenue unavailable; using country fallback: %s", symbol, e)
             regional_revenues = {country or "Global": revenues if revenues else 1}
+        marketscreener_forecast_error = None
         try:
             forecast_defaults = forecast_defaults_future.result()
         except Exception as e:
-            logger.debug("%s revenue forecasts unavailable; using defaults: %s", symbol, e)
+            marketscreener_forecast_error = f"{type(e).__name__}: {e}"
+            logger.debug("%s revenue forecasts unavailable; skipping DCF DB update: %s", symbol, e)
             forecast_defaults = {}
     finally:
         if should_shutdown_executor:
@@ -499,6 +501,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
                     "bridged_ntm_revenue": bridged_ntm_revenue,
                     "bridged_ntm_operating_income": bridged_ntm_operating_income,
                     "rolling_ntm_revenues": rolling_ntm_revenues,
+                    "marketscreener_forecast_error": marketscreener_forecast_error,
                 },
             },
         },

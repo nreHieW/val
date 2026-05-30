@@ -3,13 +3,14 @@ import json
 import logging
 import os
 import re
+import time
 from io import StringIO
 
 import numpy as np
 import pandas as pd
 from bs4 import BeautifulSoup
 
-from scrape.core.config import JSON_LOCK
+from scrape.core.config import JSON_LOCK, MARKETSCREENER_RETRIES, MARKETSCREENER_RETRY_SLEEP_SECONDS
 from scrape.core.http_utils import browser_get
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ def get_marketscreener_url(ticker, name: str = ""):
         return cached_link
 
     search_url = "https://www.marketscreener.com/search/?q=" + "+".join(ticker.split())
-    page = browser_get(search_url)
+    page = _marketscreener_get(search_url)
     soup = BeautifulSoup(page.content, "lxml")
     rows = soup.find_all("tr")
     found_link = None
@@ -64,7 +65,7 @@ def get_marketscreener_url(ticker, name: str = ""):
 
     if not found_link and name:
         search_url = "https://www.marketscreener.com/search/?q=" + "+".join(name.split())
-        page = browser_get(search_url)
+        page = _marketscreener_get(search_url)
         soup = BeautifulSoup(page.content, "lxml")
         rows = soup.find_all("tr")
         for row in rows:
@@ -85,10 +86,24 @@ def get_marketscreener_url(ticker, name: str = ""):
     return found_link
 
 
+def _marketscreener_get(url):
+    last_error = None
+    for attempt in range(MARKETSCREENER_RETRIES):
+        try:
+            response = browser_get(url)
+            response.raise_for_status()
+            return response
+        except Exception as e:
+            last_error = e
+            if attempt < MARKETSCREENER_RETRIES - 1:
+                time.sleep(MARKETSCREENER_RETRY_SLEEP_SECONDS * (attempt + 1))
+    raise last_error
+
+
 def get_revenue_by_region(ticker, url):
     if not url:
         raise ValueError(f"No MarketScreener URL for {ticker}")
-    page = browser_get(url + "company/")
+    page = _marketscreener_get(url + "company/")
     soup = BeautifulSoup(page.content, "lxml")
     df = None
     for div in soup.find_all("div", {"class": "card mb-15 card--collapsible card--scrollable"}):
@@ -109,7 +124,7 @@ def get_revenue_by_region(ticker, url):
 
 
 def get_revenue_forecasts(url):
-    page = browser_get(url + "finances/")
+    page = _marketscreener_get(url + "finances/")
     soup = BeautifulSoup(page.content, features="lxml")
     for div in soup.find_all("div", {"class": "card card--collapsible mb-15"}):
         header = div.find("div", {"class": "card-header"})

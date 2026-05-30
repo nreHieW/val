@@ -222,5 +222,5 @@ def yahooquery_close_series(history: pd.DataFrame) -> pd.Series:
     close = close.dropna()
     if isinstance(close.index, pd.MultiIndex):
         close = close.droplevel(0)
-    close.index = pd.to_datetime(close.index)
+    close.index = pd.to_datetime(close.index, utc=True).tz_localize(None)
     return close

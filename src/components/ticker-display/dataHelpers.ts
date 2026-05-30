@@ -17,7 +17,7 @@ export function createIncomeStatementData(data: any[]): BarChartData {
     const { revenues, operating_margin, taxes, reinvestment, fcff } = item;
     const operating_expenses = revenues * (1 - operating_margin);
     if (index === 0) {
-      metrics.forEach((metric, idx) => {
+      metrics.forEach((metric) => {
         acc.push({
           label: metric,
           data: [],

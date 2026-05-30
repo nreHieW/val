@@ -1,26 +1,20 @@
 import concurrent.futures
 import logging
-import random
 import time
 from functools import lru_cache
 
 import pandas as pd
-import yfinance as yf
-from yfinance.exceptions import YFRateLimitError
 
-from scrape.core.config import YAHOO_INFO_MAX_WORKERS, YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS
-from scrape.core.rate_limit import yahoo_call
+from scrape.core.config import YAHOO_INFO_MAX_WORKERS
 from scrape.sources.sec_companyfacts import get_sec_ttm_financials
+from scrape.sources.yahooquery_adapter import YahooQueryTicker
 
 logger = logging.getLogger(__name__)
-
-def _retry_sleep(attempt: int):
-    time.sleep(YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1) + random.uniform(0, 1))
 
 
 @lru_cache(maxsize=10000)
 def get_yahoo_info(ticker):
-    return yahoo_call(lambda: yf.Ticker(ticker).get_info())
+    return YahooQueryTicker(ticker).get_info()
 
 
 def build_yahoo_profile(ticker, ticker_info):
@@ -93,76 +87,69 @@ def compute_ebitda(statement: pd.DataFrame, start=0, count=4):
 def get_ttm_financials(ticker, yahoo_snapshot=None):
     sec_financials = get_sec_ttm_financials(ticker)
 
-    for attempt in range(YAHOO_INFO_RETRIES):
-        try:
-            if yahoo_snapshot is not None:
-                quarterly_income_stmt = yahoo_snapshot.quarterly_income_stmt
-                quarterly_cashflow = yahoo_snapshot.quarterly_cashflow
-            else:
-                yf_ticker = yf.Ticker(ticker)
-                quarterly_income_stmt = normalize_quarterly_statement(yahoo_call(lambda: yf_ticker.quarterly_income_stmt))
-                quarterly_cashflow = normalize_quarterly_statement(yahoo_call(lambda: yf_ticker.quarterly_cashflow))
-            if quarterly_income_stmt.empty:
-                return None
-
-            most_recent_quarter = quarterly_income_stmt.columns[0]
-            result = {
-                "Ticker": ticker,
-                "Revenue TTM": sum_statement_metric(
-                    quarterly_income_stmt,
-                    ["Total Revenue", "Operating Revenue", "Revenue"],
-                ),
-                "Revenue Prev TTM": sum_statement_metric(
-                    quarterly_income_stmt,
-                    ["Total Revenue", "Operating Revenue", "Revenue"],
-                    start=4,
-                    count=4,
-                ),
-                "Net Income TTM": sum_statement_metric(
-                    quarterly_income_stmt,
-                    [
-                        "Net Income Common Stockholders",
-                        "Net Income Including Noncontrolling Interests",
-                        "Net Income",
-                    ],
-                ),
-                "Net Income Prev TTM": sum_statement_metric(
-                    quarterly_income_stmt,
-                    [
-                        "Net Income Common Stockholders",
-                        "Net Income Including Noncontrolling Interests",
-                        "Net Income",
-                    ],
-                    start=4,
-                    count=4,
-                ),
-                "EBITDA TTM": compute_ebitda(quarterly_income_stmt),
-                "EBITDA Prev TTM": compute_ebitda(quarterly_income_stmt, start=4, count=4),
-                "EBIT TTM": sum_statement_metric(
-                    quarterly_income_stmt,
-                    ["EBIT", "Operating Income"],
-                ),
-                "EBIT Prev TTM": sum_statement_metric(
-                    quarterly_income_stmt,
-                    ["EBIT", "Operating Income"],
-                    start=4,
-                    count=4,
-                ),
-                "Free Cash Flow TTM": sum_statement_metric(quarterly_cashflow, ["Free Cash Flow"]),
-                "TTM Period End": pd.Timestamp(most_recent_quarter).strftime("%Y-%m-%d"),
-            }
-            if sec_financials:
-                result.update({key: value for key, value in sec_financials.items() if value is not None})
-            return result
-        except YFRateLimitError:
-            if attempt == YAHOO_INFO_RETRIES - 1:
-                logger.debug("%s TTM skipped: Yahoo rate limited after %s attempts", ticker, YAHOO_INFO_RETRIES)
-                return None
-
-            _retry_sleep(attempt)
-        except Exception as e:
-            logger.debug("%s TTM skipped: %s", ticker, e)
+    try:
+        if yahoo_snapshot is not None:
+            quarterly_income_stmt = yahoo_snapshot.quarterly_income_stmt
+            quarterly_cashflow = yahoo_snapshot.quarterly_cashflow
+        else:
+            yahoo_ticker = YahooQueryTicker(ticker)
+            quarterly_income_stmt = normalize_quarterly_statement(yahoo_ticker.quarterly_income_stmt)
+            quarterly_cashflow = normalize_quarterly_statement(yahoo_ticker.quarterly_cashflow)
+        if quarterly_income_stmt.empty:
             return None
+
+        most_recent_quarter = quarterly_income_stmt.columns[0]
+        result = {
+            "Ticker": ticker,
+            "Revenue TTM": sum_statement_metric(
+                quarterly_income_stmt,
+                ["Total Revenue", "Operating Revenue", "Revenue"],
+            ),
+            "Revenue Prev TTM": sum_statement_metric(
+                quarterly_income_stmt,
+                ["Total Revenue", "Operating Revenue", "Revenue"],
+                start=4,
+                count=4,
+            ),
+            "Net Income TTM": sum_statement_metric(
+                quarterly_income_stmt,
+                [
+                    "Net Income Common Stockholders",
+                    "Net Income Including Noncontrolling Interests",
+                    "Net Income",
+                ],
+            ),
+            "Net Income Prev TTM": sum_statement_metric(
+                quarterly_income_stmt,
+                [
+                    "Net Income Common Stockholders",
+                    "Net Income Including Noncontrolling Interests",
+                    "Net Income",
+                ],
+                start=4,
+                count=4,
+            ),
+            "EBITDA TTM": compute_ebitda(quarterly_income_stmt),
+            "EBITDA Prev TTM": compute_ebitda(quarterly_income_stmt, start=4, count=4),
+            "EBIT TTM": sum_statement_metric(
+                quarterly_income_stmt,
+                ["EBIT", "Operating Income"],
+            ),
+            "EBIT Prev TTM": sum_statement_metric(
+                quarterly_income_stmt,
+                ["EBIT", "Operating Income"],
+                start=4,
+                count=4,
+            ),
+            "Free Cash Flow TTM": sum_statement_metric(quarterly_cashflow, ["Free Cash Flow"]),
+            "TTM Period End": pd.Timestamp(most_recent_quarter).strftime("%Y-%m-%d"),
+        }
+        if sec_financials:
+            result.update({key: value for key, value in sec_financials.items() if value is not None})
+        return result
+    except Exception as e:
+        logger.debug("%s TTM skipped: %s", ticker, e)
+        return None
 
 
 def compute_ttm_financials(tickers, yahoo_snapshots=None):
@@ -190,22 +177,6 @@ def compute_ttm_financials(tickers, yahoo_snapshots=None):
     return pd.DataFrame(ordered_financials).set_index("Ticker")
 
 
-def get_info(ticker):
-    for attempt in range(YAHOO_INFO_RETRIES):
-        try:
-            ticker_info = get_yahoo_info(ticker)
-            return build_yahoo_profile(ticker, ticker_info)
-        except YFRateLimitError:
-            if attempt == YAHOO_INFO_RETRIES - 1:
-                logger.debug("%s profile skipped: Yahoo rate limited after %s attempts", ticker, YAHOO_INFO_RETRIES)
-                return None
-
-            _retry_sleep(attempt)
-        except Exception as e:
-            logger.debug("%s profile skipped: %s", ticker, e)
-            return None
-
-
 def get_and_parse_yahoo(tickers, cached_profiles=None, yahoo_snapshots=None):
     cached_profiles = cached_profiles or {}
     yahoo_snapshots = yahoo_snapshots or {}
@@ -225,10 +196,17 @@ def get_and_parse_yahoo(tickers, cached_profiles=None, yahoo_snapshots=None):
         for i in range(0, len(missing_tickers), YAHOO_INFO_MAX_WORKERS):
             batch = missing_tickers[i : i + YAHOO_INFO_MAX_WORKERS]
             with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_INFO_MAX_WORKERS) as executor:
-                results = list(executor.map(get_info, batch))
-            for result in results:
-                if result:
-                    profiles_by_ticker[result["Ticker"]] = result
+                futures = {executor.submit(get_yahoo_info, ticker): ticker for ticker in batch}
+                for future in concurrent.futures.as_completed(futures):
+                    ticker = futures[future]
+                    try:
+                        ticker_info = future.result()
+                    except Exception as e:
+                        logger.debug("%s profile skipped: %s", ticker, e)
+                        continue
+                    if ticker_info:
+                        profile = build_yahoo_profile(ticker, ticker_info)
+                        profiles_by_ticker[profile["Ticker"]] = profile
 
             if i + YAHOO_INFO_MAX_WORKERS < len(missing_tickers):
                 time.sleep(1)

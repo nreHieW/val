@@ -9,6 +9,7 @@ from yfinance.exceptions import YFRateLimitError
 from scrape.core.config import YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS
 from scrape.core.rate_limit import yahoo_call
 from scrape.sources.yahoo_profiles import get_yahoo_info
+from scrape.sources.yahooquery_adapter import YahooQueryTicker, yahooquery_close_series
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +55,8 @@ def _yahoo_call(label, fn, retry_none=False):
     return None
 
 
-def get_similar_companies(source):
-    info = _yahoo_call(f"{source} similar companies", lambda: get_yahoo_info(source))
+def get_similar_companies(source, yahoo_info=None):
+    info = yahoo_info or _yahoo_call(f"{source} similar companies", lambda: get_yahoo_info(source))
     if info is None:
         return None
     industry = info["industry"].replace(" - ", "—")
@@ -89,12 +90,12 @@ def _industry_performance(symbol):
     empty = {name: None for name in [*PERFORMANCE_PERIODS, "ytd"]}
     history = _yahoo_call(
         f"{symbol} industry performance",
-        lambda: yf.Ticker(symbol).history(period="1y", interval="1d", auto_adjust=True),
+        lambda: YahooQueryTicker(symbol).history(period="1y", interval="1d"),
     )
     if history is None:
         return empty
 
-    closes = history["Close"].dropna()
+    closes = yahooquery_close_series(history)
     if len(closes) < 2:
         return empty
 

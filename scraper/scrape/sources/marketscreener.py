@@ -1,4 +1,3 @@
-import concurrent.futures
 import datetime
 import json
 import logging
@@ -10,19 +9,44 @@ import numpy as np
 import pandas as pd
 from bs4 import BeautifulSoup
 
-from scrape.core.config import JSON_LOCK, MAX_WORKERS
-from scrape.core.http_utils import browser_get, get_htmls
+from scrape.core.config import JSON_LOCK
+from scrape.core.http_utils import browser_get
 
 logger = logging.getLogger(__name__)
+_MARKETSCREENER_CACHE_FILE = "marketscreener_links.json"
+_MARKETSCREENER_CACHE = {}
+_MARKETSCREENER_CACHE_LOADED = False
+_MARKETSCREENER_CACHE_DIRTY = False
+
+
+def load_marketscreener_cache():
+    global _MARKETSCREENER_CACHE, _MARKETSCREENER_CACHE_LOADED
+    with JSON_LOCK:
+        if _MARKETSCREENER_CACHE_LOADED:
+            return
+        if os.path.exists(_MARKETSCREENER_CACHE_FILE):
+            with open(_MARKETSCREENER_CACHE_FILE, "r") as f:
+                _MARKETSCREENER_CACHE = json.load(f)
+        _MARKETSCREENER_CACHE_LOADED = True
+
+
+def save_marketscreener_cache():
+    global _MARKETSCREENER_CACHE_DIRTY
+    with JSON_LOCK:
+        if not _MARKETSCREENER_CACHE_DIRTY:
+            return
+        with open(_MARKETSCREENER_CACHE_FILE, "w") as f:
+            json.dump(_MARKETSCREENER_CACHE, f)
+        _MARKETSCREENER_CACHE_DIRTY = False
 
 
 def get_marketscreener_url(ticker, name: str = ""):
+    global _MARKETSCREENER_CACHE_DIRTY
+    load_marketscreener_cache()
     with JSON_LOCK:
-        if os.path.exists("marketscreener_links.json"):
-            with open("marketscreener_links.json", "r") as f:
-                cached_link = json.load(f).get(ticker)
-            if cached_link:
-                return cached_link
+        cached_link = _MARKETSCREENER_CACHE.get(ticker)
+    if cached_link:
+        return cached_link
 
     search_url = "https://www.marketscreener.com/search/?q=" + "+".join(ticker.split())
     page = browser_get(search_url)
@@ -55,15 +79,8 @@ def get_marketscreener_url(ticker, name: str = ""):
         logger.debug("Could not find %s on marketscreener", ticker)
     else:
         with JSON_LOCK:
-            if os.path.exists("marketscreener_links.json"):
-                with open("marketscreener_links.json", "r") as f:
-                    data = json.load(f)
-                data[ticker] = found_link
-            else:
-                data = {ticker: found_link}
-
-            with open("marketscreener_links.json", "w") as f:
-                json.dump(data, f)
+            _MARKETSCREENER_CACHE[ticker] = found_link
+            _MARKETSCREENER_CACHE_DIRTY = True
 
     return found_link
 
@@ -167,78 +184,3 @@ def get_revenue_forecasts(url):
             }
 
     raise ValueError(f"No income statement section found for MarketScreener URL {url!r}")
-
-
-def get_marketscreener_links(tickers):
-    links = {}
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(get_marketscreener_url, ticker): ticker for ticker in tickers}
-        for future in concurrent.futures.as_completed(futures):
-            ticker = futures[future]
-            try:
-                link = future.result()
-                if not link:
-                    continue
-                if not link.endswith("/"):
-                    link += "/"
-                links[ticker] = link + "finances/"
-            except Exception:
-                continue
-
-    return links
-
-
-def parse_marketscreener(marketscreener_urls):
-    if not marketscreener_urls:
-        return pd.DataFrame()
-
-    htmls = dict(zip(marketscreener_urls.keys(), get_htmls(list(marketscreener_urls.values()), browser=True)))
-    dfs = []
-
-    for ticker, html in htmls.items():
-        if not html:
-            continue
-        try:
-            soup = BeautifulSoup(html, features="lxml")
-            for div in soup.find_all("div", {"class": "card card--collapsible mb-15"}):
-                header = div.find("div", {"class": "card-header"})
-                if not header:
-                    continue
-                header_text = header.text.lower()
-                if "income statement" not in header_text:
-                    continue
-
-                income_statement = pd.read_html(StringIO(str(div.find("table"))))[0]
-                income_statement = income_statement.dropna(axis=1, how="all")
-                first_col = income_statement.columns[0]
-                income_statement[first_col] = income_statement[first_col].astype(str).str.replace(r"\d", "", regex=True).str.strip()
-                income_statement.set_index(first_col, inplace=True)
-                income_statement.index = income_statement.index.str.strip()
-                if income_statement.index.has_duplicates:
-                    income_statement = income_statement.groupby(level=0).first()
-                income_statement = income_statement.reindex(["Net sales", "Net income", "EBITDA", "EBIT"]).fillna(0)
-                indiv = income_statement.stack()
-                indiv.index = [" ".join(x) for x in indiv.index]
-                indiv = indiv.to_frame().T
-
-                superscript = div.find("sup")
-                if superscript and superscript.attrs.get("title"):
-                    title = superscript.attrs["title"].strip().split()
-                    indiv["Currency"] = title[0] if len(title) > 0 else 0
-                    indiv["Unit"] = title[-1] if len(title) > 1 else 0
-                else:
-                    indiv["Currency"] = 0
-                    indiv["Unit"] = 0
-
-                indiv["Ticker"] = ticker
-                dfs.append(indiv)
-                break
-        except Exception as e:
-            logger.debug("Failed to parse Marketscreener %s: %s", ticker, e)
-
-    if not dfs:
-        return pd.DataFrame()
-
-    marketscreener = pd.concat(dfs, axis=0, join="outer", ignore_index=True)
-    return marketscreener.reset_index(drop=True).fillna(0).set_index("Ticker")

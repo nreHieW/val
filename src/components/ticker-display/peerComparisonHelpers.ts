@@ -87,39 +87,3 @@ export function formatMetricValue(key: MetricKey, value: number | null): string 
   return value.toFixed(2);
 }
 
-export function getCellBgColor(
-  key: MetricKey,
-  value: number | null,
-  baseValue: number | null,
-  higherIsBetter: boolean,
-): string | undefined {
-  if (
-    value === null ||
-    baseValue === null ||
-    !Number.isFinite(value) ||
-    !Number.isFinite(baseValue) ||
-    value === baseValue
-  ) {
-    return undefined;
-  }
-
-  const baseline = Math.abs(baseValue) < 1e-6 ? 1 : Math.abs(baseValue);
-  const normalizedDiff = Math.min(Math.abs((value - baseValue) / baseline), 1);
-  const alpha = 0.22 + normalizedDiff * 0.38;
-  const isValuationMultiple =
-    key === "pe" ||
-    key === "forwardPe" ||
-    key === "priceToSales" ||
-    key === "priceToFcf" ||
-    key === "evToEbitda" ||
-    key === "evToSales";
-  const better = isValuationMultiple && !higherIsBetter
-    ? value > 0 && (baseValue <= 0 || value < baseValue)
-    : higherIsBetter
-      ? value > baseValue
-      : value < baseValue;
-
-  return better
-    ? `hsl(var(--signal-positive) / ${alpha.toFixed(3)})`
-    : `hsl(var(--signal-negative) / ${alpha.toFixed(3)})`;
-}

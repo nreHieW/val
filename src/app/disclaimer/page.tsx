@@ -1,5 +1,3 @@
-import React from "react";
-
 export default function DisclaimerPage() {
   return (
     <main className="pb-12 sm:pb-16">

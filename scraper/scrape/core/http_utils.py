@@ -62,11 +62,6 @@ def get_proxy():
     return {"http": PROXIES[idx], "https": PROXIES[idx]}
 
 
-def request_get(url, **kwargs):
-    request_headers = kwargs.pop("headers", headers)
-    return _requests_session().get(url, headers=request_headers, **kwargs)
-
-
 def browser_get(url, **kwargs):
     """GET a page using a real browser TLS fingerprint.
 

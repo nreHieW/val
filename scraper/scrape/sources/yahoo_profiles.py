@@ -6,10 +6,24 @@ from functools import lru_cache
 import pandas as pd
 
 from scrape.core.config import YAHOO_INFO_MAX_WORKERS
-from scrape.sources.sec_companyfacts import get_sec_ttm_financials
+from scrape.sources.sec_companyfacts import SecRateLimited, get_sec_ttm_financials
 from scrape.sources.yahooquery_adapter import YahooQueryTicker
 
 logger = logging.getLogger(__name__)
+
+YAHOO_TTM_FALLBACK = {
+    "EBITDA TTM": None,
+    "EBITDA Prev TTM": None,
+    "Free Cash Flow TTM": None,
+}
+YAHOO_FINANCIAL_KEYS = [
+    "Revenue TTM",
+    "Net Income TTM",
+    "EBIT TTM",
+    "EBITDA TTM",
+    "EBITDA Prev TTM",
+    "Free Cash Flow TTM",
+]
 
 
 @lru_cache(maxsize=10000)
@@ -54,11 +68,12 @@ def sum_statement_metric(statement: pd.DataFrame, metric_names: list[str], start
         return None
 
     for metric_name in metric_names:
-        if metric_name in statement.index:
-            values = pd.to_numeric(statement.loc[metric_name, columns], errors="coerce")
-            if values.isna().any():
-                return None
-            return float(values.sum())
+        if metric_name not in statement.index:
+            continue
+        values = pd.to_numeric(statement.loc[metric_name, columns], errors="coerce")
+        if values.isna().any():
+            return None
+        return float(values.sum())
 
     return None
 
@@ -84,24 +99,30 @@ def compute_ebitda(statement: pd.DataFrame, start=0, count=4):
     return ebit + depreciation
 
 
-def get_ttm_financials(ticker, yahoo_snapshot=None):
+def get_ttm_financials(ticker, yahoo_snapshot=None, fx_rates=None):
     try:
         sec_financials = get_sec_ttm_financials(ticker)
+    except SecRateLimited as e:
+        logger.debug("%s SEC TTM rate limited: %s", ticker, e)
+        return None
     except Exception as e:
-        logger.warning("%s SEC TTM skipped: %s", ticker, e)
+        logger.debug("%s SEC TTM skipped: %s", ticker, e)
         return None
 
     try:
         if yahoo_snapshot is not None:
             quarterly_income_stmt = yahoo_snapshot.quarterly_income_stmt
             quarterly_cashflow = yahoo_snapshot.quarterly_cashflow
+            ticker_info = yahoo_snapshot.info or {}
         else:
             yahoo_ticker = YahooQueryTicker(ticker)
             quarterly_income_stmt = normalize_quarterly_statement(yahoo_ticker.quarterly_income_stmt)
             quarterly_cashflow = normalize_quarterly_statement(yahoo_ticker.quarterly_cashflow)
+            ticker_info = get_yahoo_info(ticker) or {}
+
         if quarterly_income_stmt.empty:
             logger.warning("%s Yahoo quarterly income statement unavailable", ticker)
-            return {**sec_financials, "EBITDA TTM": None, "EBITDA Prev TTM": None, "Free Cash Flow TTM": None}
+            return {**sec_financials, **YAHOO_TTM_FALLBACK}
 
         most_recent_quarter = quarterly_income_stmt.columns[0]
         result = {
@@ -128,19 +149,35 @@ def get_ttm_financials(ticker, yahoo_snapshot=None):
         for key in ["EBITDA TTM", "EBITDA Prev TTM", "Free Cash Flow TTM"]:
             if result[key] is None:
                 logger.warning("%s %s unavailable from Yahoo", ticker, key)
+
+        financial_currency = ticker_info.get("financialCurrency")
+        if financial_currency and financial_currency != "USD":
+            fx_rate = fx_rates[financial_currency]
+            for key in YAHOO_FINANCIAL_KEYS:
+                if result[key] is not None:
+                    result[key] *= fx_rate
+            result["Financial Currency"] = "USD"
+            result["Source Financial Currency"] = financial_currency
+            result["Financial USD FX Rate"] = fx_rate
+
         return result
     except Exception as e:
         logger.warning("%s Yahoo latest TTM/cash flow skipped: %s", ticker, e)
-        return {**sec_financials, "EBITDA TTM": None, "EBITDA Prev TTM": None, "Free Cash Flow TTM": None}
+        return {**sec_financials, **YAHOO_TTM_FALLBACK}
 
 
-def compute_ttm_financials(tickers, yahoo_snapshots=None):
+def compute_ttm_financials(tickers, yahoo_snapshots=None, fx_rates=None):
     yahoo_snapshots = yahoo_snapshots or {}
     ttm_financials_by_ticker = {}
     for i in range(0, len(tickers), YAHOO_INFO_MAX_WORKERS):
         batch = tickers[i : i + YAHOO_INFO_MAX_WORKERS]
         with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_INFO_MAX_WORKERS) as executor:
-            results = list(executor.map(lambda ticker: get_ttm_financials(ticker, yahoo_snapshots.get(ticker)), batch))
+            results = list(
+                executor.map(
+                    lambda ticker: get_ttm_financials(ticker, yahoo_snapshots.get(ticker), fx_rates),
+                    batch,
+                )
+            )
         for result in results:
             if result:
                 ttm_financials_by_ticker[result["Ticker"]] = result

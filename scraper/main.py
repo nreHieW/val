@@ -190,25 +190,25 @@ def run_market_discovery_scrape(tickers, client, yahoo_snapshots=None):
 
 def run_comps_scrape(tickers, client, cached_yahoo_profiles=None, yahoo_snapshots=None):
     yahoo_df = get_and_parse_yahoo(tickers, cached_profiles=cached_yahoo_profiles, yahoo_snapshots=yahoo_snapshots)
-    ttm_financials_df = compute_ttm_financials(tickers, yahoo_snapshots=yahoo_snapshots)
-
-    combined = pd.concat([yahoo_df, ttm_financials_df], axis=1, join="outer")
-    combined = combined.astype(object).where(pd.notna(combined), None)
-    combined.reset_index(inplace=True)
-    combined = combined.rename(columns={"index": "Ticker"})
-    combined.sort_values("Ticker", inplace=True)
+    fx_rates = get_exchange_rates()
+    ttm_financials_df = compute_ttm_financials(tickers, yahoo_snapshots=yahoo_snapshots, fx_rates=fx_rates)
 
     db = client[os.getenv("MONGODB_DB_NAME")]["financials"]
-    data = combined.to_dict(orient="records")
-    data = json.loads(json.dumps(data, cls=CustomEncoder))
     operations = []
-    for record in data:
-        cleaned_record = {key: value for key, value in record.items() if value is not None}
-        unset_record = {key: "" for key, value in record.items() if value is None}
-        update = {"$set": cleaned_record}
-        if unset_record:
-            update["$unset"] = unset_record
-        operations.append(UpdateOne({"Ticker": record["Ticker"]}, update, upsert=True))
+    for df in [yahoo_df, ttm_financials_df]:
+        if df.empty:
+            continue
+        records = df.astype(object).where(pd.notna(df), None).reset_index()
+        records = records.rename(columns={"index": "Ticker"})
+        records = json.loads(json.dumps(records.to_dict(orient="records"), cls=CustomEncoder))
+        operations.extend(
+            UpdateOne(
+                {"Ticker": record["Ticker"]},
+                {"$set": {key: value for key, value in record.items() if value is not None}},
+                upsert=True,
+            )
+            for record in records
+        )
     if operations:
         db.bulk_write(operations, ordered=False)
 

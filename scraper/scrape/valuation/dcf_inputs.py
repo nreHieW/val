@@ -366,7 +366,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
         year: value * forecast_fx_rate
         for year, value in forecast_defaults.get("consensus_ebit", {}).items()
     }
-    fiscal_bridge_context = build_fiscal_bridge_context(info, quarterly_income_statement)
+    fiscal_bridge_context = build_fiscal_bridge_context(info, quarterly_income_statement, fx_rate)
     current_fiscal_year = None
     next_fiscal_year = None
     bridged_ntm_revenue = None

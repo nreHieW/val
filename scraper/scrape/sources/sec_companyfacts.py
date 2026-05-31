@@ -1,18 +1,37 @@
 import logging
+import time
 from datetime import date
 from functools import lru_cache
 
 import requests
 
+from scrape.core.config import REQUEST_TIMEOUT_SECONDS, SEC_USER_AGENT
+from scrape.core.rate_limit import RateLimiter
+
 logger = logging.getLogger(__name__)
 
-SEC_HEADERS = {"User-Agent": "Val financial scraper contact@example.com"}
+SEC_HEADERS = {
+    "User-Agent": SEC_USER_AGENT,
+    "Accept-Encoding": "gzip, deflate",
+}
 TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
 COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 
 REVENUE_TAGS = ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet"]
 NET_INCOME_TAGS = ["NetIncomeLoss", "ProfitLoss"]
 EBIT_TAGS = ["OperatingIncomeLoss", "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest"]
+
+SEC_REQUEST_MIN_INTERVAL_SECONDS = 0.25
+SEC_REQUEST_JITTER_SECONDS = 0.1
+SEC_RETRIES = 4
+SEC_RETRY_SLEEP_SECONDS = 30
+
+_sec_limiter = RateLimiter(SEC_REQUEST_MIN_INTERVAL_SECONDS, SEC_REQUEST_JITTER_SECONDS)
+_sec_session = requests.Session()
+
+
+class SecRateLimited(RuntimeError):
+    pass
 
 
 def days_between(start, end):
@@ -22,13 +41,33 @@ def days_between(start, end):
         return None
 
 
+def _sec_get_json(url):
+    for attempt in range(SEC_RETRIES):
+        _sec_limiter.wait()
+        response = _sec_session.get(url, headers=SEC_HEADERS, timeout=REQUEST_TIMEOUT_SECONDS)
+        if response.status_code != 429:
+            response.raise_for_status()
+            return response.json()
+
+        if attempt == SEC_RETRIES - 1:
+            raise SecRateLimited(f"SEC 429 after {SEC_RETRIES} attempts for {response.url}")
+
+        retry_after = response.headers.get("Retry-After")
+        try:
+            sleep_seconds = float(retry_after) if retry_after else SEC_RETRY_SLEEP_SECONDS * (attempt + 1)
+        except ValueError:
+            sleep_seconds = SEC_RETRY_SLEEP_SECONDS * (attempt + 1)
+        logger.debug("SEC rate limited; retrying in %.1fs", sleep_seconds)
+        time.sleep(max(0.0, sleep_seconds))
+
+    raise SecRateLimited(f"SEC 429 after {SEC_RETRIES} attempts for {url}")
+
+
 @lru_cache(maxsize=1)
 def get_sec_ticker_cik_map():
-    response = requests.get(TICKER_MAP_URL, headers=SEC_HEADERS, timeout=30)
-    response.raise_for_status()
     return {
         item["ticker"].upper(): int(item["cik_str"])
-        for item in response.json().values()
+        for item in _sec_get_json(TICKER_MAP_URL).values()
         if item.get("ticker") and item.get("cik_str")
     }
 
@@ -39,20 +78,20 @@ def get_cik_for_ticker(ticker):
 
 @lru_cache(maxsize=10000)
 def get_companyfacts(cik):
-    response = requests.get(COMPANYFACTS_URL.format(cik=cik), headers=SEC_HEADERS, timeout=30)
-    response.raise_for_status()
-    return response.json()
+    return _sec_get_json(COMPANYFACTS_URL.format(cik=cik))
 
 
 def quarterly_values_for_facts(facts):
     quarters_by_end = {}
     for fact in facts:
         days = days_between(fact.get("start"), fact.get("end"))
-        if fact.get("form") == "10-Q" and days is not None and 70 <= days <= 110:
-            end = fact.get("end")
-            previous = quarters_by_end.get(end)
-            if end and (previous is None or str(fact.get("filed", "")) > str(previous.get("filed", ""))):
-                quarters_by_end[end] = fact
+        if fact.get("form") != "10-Q" or days is None or not 70 <= days <= 110:
+            continue
+
+        end = fact.get("end")
+        previous = quarters_by_end.get(end)
+        if end and (previous is None or str(fact.get("filed", "")) > str(previous.get("filed", ""))):
+            quarters_by_end[end] = fact
 
     quarters = [
         {
@@ -66,10 +105,13 @@ def quarterly_values_for_facts(facts):
 
     for annual in facts:
         days = days_between(annual.get("start"), annual.get("end"))
-        if annual.get("form") != "10-K" or annual.get("fp") != "FY" or days is None or not 330 <= days <= 380 or annual.get("val") is None:
+        if annual.get("form") != "10-K" or annual.get("fp") != "FY" or days is None:
+            continue
+        if not 330 <= days <= 380 or annual.get("val") is None:
             continue
         if any(q["end"] == annual.get("end") for q in quarters):
             continue
+
         fiscal_quarters = [
             q
             for q in quarters
@@ -91,8 +133,7 @@ def quarterly_values(companyfacts, tags):
     candidates = []
     us_gaap = companyfacts.get("facts", {}).get("us-gaap", {})
     for tag in tags:
-        units = us_gaap.get(tag, {}).get("units", {})
-        facts = units.get("USD") or []
+        facts = us_gaap.get(tag, {}).get("units", {}).get("USD") or []
         quarters = quarterly_values_for_facts(facts)
         if quarters:
             candidates.append(quarters)
@@ -126,7 +167,7 @@ def get_sec_ttm_financials(ticker):
     for prefix, tags in [("Net Income", NET_INCOME_TAGS), ("EBIT", EBIT_TAGS)]:
         latest, previous, quarters = latest_and_previous_ttm(companyfacts, tags)
         if latest is None or previous is None:
-            logger.warning("SEC %s TTM unavailable for %s; quarters=%s", prefix, ticker, len(quarters))
+            logger.debug("SEC %s TTM unavailable for %s; quarters=%s", prefix, ticker, len(quarters))
         result[f"{prefix} TTM"] = latest
         result[f"{prefix} Prev TTM"] = previous
 

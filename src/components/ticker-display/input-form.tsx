@@ -344,7 +344,7 @@ function InputForm({
         <HoverCardTrigger asChild>
           <button
             type="button"
-            className="rounded-full border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-amber-700 transition-colors hover:bg-amber-500/15 dark:text-amber-300"
+            className="px-1.5 py-0.5 text-[9px] tracking-wide text-muted-foreground/40 transition-colors hover:text-muted-foreground/60 cursor-help"
             aria-label="Revenue growth estimate is unverified"
           >
             unverified

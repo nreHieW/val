@@ -385,50 +385,54 @@ const REVERSE_DCF_MIN_CAGR = -0.95;
 const REVERSE_DCF_MAX_CAGR = 1.5;
 const REVERSE_DCF_TOLERANCE = 1e-8;
 
-function emptyReverseDcfScenario(): ReverseDcfScenario {
-  return { implied_value: null, validation_value_per_share: null, validation_error: null };
-}
-
-function valuePerShareAtCagr(input: DcfInput, cagr: number) {
-  return dcf({ ...input, compounded_annual_revenue_growth_rate: cagr }).value_per_share;
+function valuePerShareAtRevenueGrowth(input: DcfInput, growthRate: number) {
+  return dcf({
+    ...input,
+    revenue_growth_rate_next_year: growthRate,
+    compounded_annual_revenue_growth_rate: growthRate,
+  }).value_per_share;
 }
 
 function solveImpliedRevenueCagr(input: DcfInput): ReverseDcfScenario {
   const targetPrice = input.curr_price;
-  if (!Number.isFinite(targetPrice)) return emptyReverseDcfScenario();
+  const diffAt = (growthRate: number) => valuePerShareAtRevenueGrowth(input, growthRate) - targetPrice;
+  const scenario = (implied_value: number | null): ReverseDcfScenario => {
+    if (implied_value == null) {
+      return { implied_value: null, validation_value_per_share: null, validation_error: null };
+    }
+
+    const validation_value_per_share = valuePerShareAtRevenueGrowth(input, implied_value);
+    return {
+      implied_value,
+      validation_value_per_share,
+      validation_error: validation_value_per_share - targetPrice,
+    };
+  };
 
   let low = REVERSE_DCF_MIN_CAGR;
   let high = REVERSE_DCF_MAX_CAGR;
-  let lowDiff = valuePerShareAtCagr(input, low) - targetPrice;
-  const highDiff = valuePerShareAtCagr(input, high) - targetPrice;
+  let lowDiff = diffAt(low);
+  const highDiff = diffAt(high);
 
-  if (Math.abs(lowDiff) <= REVERSE_DCF_TOLERANCE) {
-    return { implied_value: low, validation_value_per_share: targetPrice + lowDiff, validation_error: lowDiff };
-  }
-  if (Math.abs(highDiff) <= REVERSE_DCF_TOLERANCE) {
-    return { implied_value: high, validation_value_per_share: targetPrice + highDiff, validation_error: highDiff };
-  }
-  if (lowDiff * highDiff > 0) return emptyReverseDcfScenario();
+  if (Math.abs(lowDiff) <= REVERSE_DCF_TOLERANCE) return scenario(low);
+  if (Math.abs(highDiff) <= REVERSE_DCF_TOLERANCE) return scenario(high);
+  if (lowDiff * highDiff > 0) return scenario(null);
 
-  let implied = input.compounded_annual_revenue_growth_rate;
   for (let i = 0; i < 100; i += 1) {
-    implied = (low + high) / 2;
-    const diff = valuePerShareAtCagr(input, implied) - targetPrice;
-    if (Math.abs(diff) <= REVERSE_DCF_TOLERANCE) break;
-    if (lowDiff * diff <= 0) {
-      high = implied;
+    const mid = (low + high) / 2;
+    const midDiff = diffAt(mid);
+
+    if (Math.abs(midDiff) <= REVERSE_DCF_TOLERANCE) return scenario(mid);
+
+    if (lowDiff * midDiff <= 0) {
+      high = mid;
     } else {
-      low = implied;
-      lowDiff = diff;
+      low = mid;
+      lowDiff = midDiff;
     }
   }
 
-  const validationValue = valuePerShareAtCagr(input, implied);
-  return {
-    implied_value: implied,
-    validation_value_per_share: validationValue,
-    validation_error: validationValue - targetPrice,
-  };
+  return scenario((low + high) / 2);
 }
 
 export function reverseDcf(input: DcfInput): ReverseDcfOutput {

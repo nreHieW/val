@@ -16,6 +16,14 @@ import InfoHover from "../info-hover";
 import OverviewTab from "./overview-tab";
 import TickerDisplayTabs from "./ticker-display-tabs";
 
+function formatNumber(value: number | null | undefined) {
+  return value == null || !Number.isFinite(value) ? "—" : value.toFixed(2);
+}
+
+function formatPercent(value: number | null | undefined) {
+  return value == null || !Number.isFinite(value) ? "—" : `${(value * 100).toFixed(2)}%`;
+}
+
 export default async function TickerDisplay({
   ticker,
   userInputs,
@@ -38,6 +46,17 @@ export default async function TickerDisplay({
   const { value_per_share, df, cost_of_capital_components, final_components } =
     dcfOutput!;
   const terminalData = df[df.length - 1];
+  const terminalSpread =
+    terminalData.cost_of_capital - terminalData.revenue_growth_rate;
+  const terminalValue =
+    [
+      terminalData.fcff,
+      terminalData.cost_of_capital,
+      terminalData.revenue_growth_rate,
+    ].some((value) => value == null || !Number.isFinite(value)) ||
+    terminalSpread === 0
+      ? null
+      : terminalData.fcff / terminalSpread;
   const reverseDcfOutput = reverseDcf(dcfInputs as DcfInput);
   const incomeStatementData = createIncomeStatementData(df);
   const revenues = df.map((item: any) => formatAmount(item.revenues));
@@ -91,37 +110,29 @@ export default async function TickerDisplay({
             >
               <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 text-xs">
                 <dt className="text-muted-foreground">Cost of Debt</dt>
-                <dd>{(cost_of_capital_components.cost_of_debt * 100).toFixed(2)}%</dd>
+                <dd>{formatPercent(cost_of_capital_components.cost_of_debt)}</dd>
                 <dt className="text-muted-foreground">(Levered) Beta</dt>
-                <dd>{cost_of_capital_components.levered_beta.toFixed(2)}</dd>
+                <dd>{formatNumber(cost_of_capital_components.levered_beta)}</dd>
                 <dt className="text-muted-foreground">Risk Free Rate</dt>
-                <dd>{(cost_of_capital_components.risk_free_rate * 100).toFixed(2)}%</dd>
+                <dd>{formatPercent(cost_of_capital_components.risk_free_rate)}</dd>
                 <dt className="text-muted-foreground">Equity Risk Premium</dt>
-                <dd>{(cost_of_capital_components.equity_risk_premium * 100).toFixed(2)}</dd>
+                <dd>{formatNumber(cost_of_capital_components.equity_risk_premium == null ? null : cost_of_capital_components.equity_risk_premium * 100)}</dd>
                 <dt className="text-muted-foreground">Cost of Equity</dt>
-                <dd>{(cost_of_capital_components.cost_of_equity * 100).toFixed(2)}%</dd>
+                <dd>{formatPercent(cost_of_capital_components.cost_of_equity)}</dd>
               </dl>
             </CardItem>
             <CardItem
               title="Terminal Value"
               tooltip="The value of the company at the end of the forecast period in stable growth."
-              footerChildren={
-                <span>
-                  Terminal Value: {formatAmount(
-                    terminalData.fcff /
-                      (terminalData.cost_of_capital -
-                        terminalData.revenue_growth_rate)
-                  )}
-                </span>
-              }
+              footerChildren={<span>Terminal Value: {formatAmount(terminalValue)}</span>}
             >
               <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 text-xs">
                 <dt className="text-muted-foreground">Terminal Growth Rate</dt>
-                <dd>{(terminalData.revenue_growth_rate * 100).toFixed(2)}%</dd>
+                <dd>{formatPercent(terminalData.revenue_growth_rate)}</dd>
                 <dt className="text-muted-foreground">Terminal Cash Flow</dt>
                 <dd>{formatAmount(terminalData.fcff)}</dd>
                 <dt className="text-muted-foreground">Terminal Discount Rate</dt>
-                <dd>{(terminalData.cost_of_capital * 100).toFixed(2)}%</dd>
+                <dd>{formatPercent(terminalData.cost_of_capital)}</dd>
               </dl>
             </CardItem>
           </div>

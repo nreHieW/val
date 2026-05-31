@@ -140,6 +140,7 @@ describe("reverse dcf", () => {
 
     const cagrValue = dcf({
       ...baseInputs,
+      revenue_growth_rate_next_year: output.implied_revenue_cagr.implied_value!,
       compounded_annual_revenue_growth_rate: output.implied_revenue_cagr.implied_value!,
     }).value_per_share;
     expectNumericClose(cagrValue, baseInputs.curr_price, "implied CAGR value");

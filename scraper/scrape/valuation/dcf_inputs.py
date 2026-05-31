@@ -336,8 +336,10 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
         try:
             regional_revenues = regional_revenues_future.result()
         except Exception as e:
+            if not country:
+                raise ValueError(f"{symbol} regional revenue unavailable and company country missing") from e
             logger.debug("%s regional revenue unavailable; using country fallback: %s", symbol, e)
-            regional_revenues = {country or "Global": revenues if revenues else 1}
+            regional_revenues = {country: revenues if revenues else 1}
         marketscreener_forecast_error = None
         try:
             forecast_defaults = forecast_defaults_future.result()

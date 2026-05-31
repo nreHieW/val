@@ -43,11 +43,9 @@ def get_regional_crps(revenues_by_region: dict, mapper: StringMapper, country_er
     for region in regions:
         if region not in final_mappings:
             final_mappings[region] = "Global"
-    # print(mapper.gts)
     crps = [country_erps.get(final_mappings[region], country_erps.get("Global", 0)) for region in regions]
     total_revenues = sum(revenues_by_region.values())
     weights = [revenues_by_region[region] / total_revenues for region in regions] if total_revenues else [1 / len(regions)] * len(regions)
-    # print(final_mappings)
     return sum([x * y for x, y in zip(crps, weights)]), {final_mappings[region]: v for region, v in revenues_by_region.items()}
 
 

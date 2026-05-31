@@ -131,43 +131,71 @@ def _marketscreener_number(value):
     return (0.0 if pd.isna(parsed) else float(parsed)) * multiplier
 
 
+def _clean_segment_label(value):
+    text = BeautifulSoup(str(value).replace("<br>", " ").replace("<br/>", " "), "lxml").get_text(" ", strip=True)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def get_revenue_by_region(ticker, url):
     if not url:
         raise ValueError(f"No MarketScreener URL for {ticker}")
-    page = _marketscreener_get(url + "company/")
+
+    page = _marketscreener_get(url.rstrip("/") + "/finances-segments/")
     soup = BeautifulSoup(page.content, "lxml")
-    df = None
-    for div in soup.find_all("div", class_=lambda classes: classes and "card" in classes):
-        header = div.find("div", {"class": "card-header"}, recursive=False)
-        if not header:
+
+    for header in soup.find_all("div", {"class": "card-header"}):
+        if "geographical revenue distribution history" not in header.get_text(" ", strip=True).lower():
             continue
-        header_text = header.get_text(" ", strip=True).lower()
-        if header_text == "sales per region" or "geographical breakdown of sales" in header_text:
-            table = div.find("table")
-            if table:
-                df = pd.read_html(StringIO(str(table)))[0]
-                break
-    if df is None:
-        raise ValueError(f"No sales per region table for {ticker}")
+        card = header.find_parent("div", class_=lambda classes: classes and "card" in classes)
+        chart = card.find(attrs={"data-fct-name": "drawFinancialSegmentCAChart"})
+        revenues = {}
+        for segment_key, segment in json.loads(chart["data-fct-attr"]).get("data", {}).items():
+            segment_name = _clean_segment_label(segment.get("name") or segment_key)
+            if segment_name.lower() == "unallocated":
+                continue
+            segment_value = 0.0
+            for value in reversed(segment.get("data") or []):
+                if pd.isna(value):
+                    continue
+                segment_value = _marketscreener_number(value)
+                if np.isfinite(segment_value):
+                    break
+            if segment_name and segment_value > 0:
+                revenues[segment_name] = segment_value
+        if revenues:
+            return revenues
 
-    country_col = df.columns[0]
-    countries = []
-    for item in df[country_col].astype(str).values:
-        match = re.search(r"^([^\d]+)", item)
-        countries.append(match.group(0).strip() if match else item.strip())
+    for header in soup.find_all("div", {"class": "card-header"}):
+        if "geographical breakdown of sales" not in header.get_text(" ", strip=True).lower():
+            continue
+        card = header.find_parent("div", class_=lambda classes: classes and "card" in classes)
+        table = card.find("table")
+        df = pd.read_html(StringIO(str(table)))[0]
+        label_col = df.columns[0]
+        country_rows = [
+            index
+            for index, row in enumerate(table.find_all("tr")[1:])
+            if "bg-grey-light" in row.get("class", [])
+        ]
+        year_columns = {}
+        for column in df.columns[1:]:
+            match = re.search(r"\b(20\d{2}|19\d{2})\b", str(column))
+            if match:
+                year_columns[int(match.group(1))] = column
+        if not year_columns:
+            raise ValueError(f"No geographical revenue year columns for {ticker}")
 
-    year_columns = {}
-    for column in df.columns[1:]:
-        match = re.search(r"\b(20\d{2}|19\d{2})\b", str(column))
-        if match:
-            year_columns[int(match.group(1))] = column
-    if not year_columns:
-        raise ValueError(f"No sales per region year columns for {ticker}")
+        for _, latest_col in sorted(year_columns.items(), reverse=True):
+            revenues = {}
+            for index in country_rows:
+                segment_name = _clean_segment_label(df.iloc[index][label_col])
+                segment_value = _marketscreener_number(df.iloc[index][latest_col])
+                if segment_value > 0:
+                    revenues[re.sub(r"\s+\d.*$", "", segment_name).strip()] = segment_value
+            if revenues:
+                return revenues
 
-    latest_year = max(year_columns)
-    latest_col = year_columns[latest_year]
-    revenues = df[latest_col].apply(_marketscreener_number).values
-    return {country: float(revenue) for country, revenue in zip(countries, revenues)}
+    raise ValueError(f"No geographical revenue segments for {ticker}")
 
 
 def get_revenue_forecasts(url):

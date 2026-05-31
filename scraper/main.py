@@ -15,9 +15,7 @@ from scrape.core.mongo import get_mongo_client
 from scrape.core.tickers import get_all_tickers
 from scrape.sources.marketscreener import load_marketscreener_cache, save_marketscreener_cache
 from scrape.sources.yahoo_market_discovery import get_sector_industries, get_similar_companies
-from scrape.sources.yahoo_overview import build_yahoo_overview
-from scrape.sources.yahoo_profiles import build_yahoo_profile, compute_ttm_financials, get_and_parse_yahoo
-from scrape.sources.yahooquery_adapter import YahooQueryTicker
+from scrape.sources.yahoo_profiles import compute_ttm_financials, get_and_parse_yahoo
 from scrape.sources.yahoo_snapshot import get_yahoo_snapshots
 from scrape.valuation.dcf_inputs import MissingFinancialStatements, get_dcf_inputs
 from scrape.valuation.market_metrics import (
@@ -206,7 +204,11 @@ def run_comps_scrape(tickers, client, cached_yahoo_profiles=None, yahoo_snapshot
     operations = []
     for record in data:
         cleaned_record = {key: value for key, value in record.items() if value is not None}
-        operations.append(UpdateOne({"Ticker": record["Ticker"]}, {"$set": cleaned_record}, upsert=True))
+        unset_record = {key: "" for key, value in record.items() if value is None}
+        update = {"$set": cleaned_record}
+        if unset_record:
+            update["$unset"] = unset_record
+        operations.append(UpdateOne({"Ticker": record["Ticker"]}, update, upsert=True))
     if operations:
         db.bulk_write(operations, ordered=False)
 
@@ -236,14 +238,6 @@ def _exception_location(exc: Exception) -> str:
     return f"{type(exc).__name__} at {os.path.relpath(frame.filename)}:{frame.lineno} in {frame.name}"
 
 
-def _fallback_yahoo_profile(ticker, yahoo_snapshot):
-    yahoo_ticker = yahoo_snapshot.yahoo_ticker if yahoo_snapshot else YahooQueryTicker(ticker)
-    info = yahoo_snapshot.info if yahoo_snapshot and yahoo_snapshot.info else yahoo_ticker.get_info()
-    yahoo_profile = build_yahoo_profile(info.get("symbol", ticker), info)
-    yahoo_overview = build_yahoo_overview(yahoo_ticker, info)
-    return info, yahoo_profile, yahoo_overview
-
-
 def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, fx_rates, yahoo_snapshot=None, marketscreener_executor=None):
     try:
         dcf_result = run_with_timeout(
@@ -266,21 +260,13 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
     except TimeoutError:
         return False, None, None, None, "timeout"
     except MissingFinancialStatements:
-        try:
-            _, yahoo_profile, yahoo_overview = _fallback_yahoo_profile(ticker, yahoo_snapshot)
-            return False, None, yahoo_profile, yahoo_overview, "skipped:missing_financial_statements"
-        except Exception:
-            logger.debug("Yahoo fallback failed for %s\n%s", ticker, traceback.format_exc())
-            return False, None, None, None, "skipped:missing_financial_statements"
+        logger.warning("DCF scrape skipped for %s: missing financial statements", ticker)
+        return False, None, None, None, "skipped:missing_financial_statements"
     except Exception as e:
         failure_reason = _exception_location(e)
+        logger.warning("DCF scrape failed for %s: %s", ticker, failure_reason)
         logger.debug("DCF scrape failed for %s\n%s", ticker, "".join(traceback.format_exception(type(e), e, e.__traceback__)))
-        try:
-            _, yahoo_profile, yahoo_overview = _fallback_yahoo_profile(ticker, yahoo_snapshot)
-            return False, None, yahoo_profile, yahoo_overview, failure_reason
-        except Exception:
-            logger.debug("Yahoo fallback failed for %s\n%s", ticker, traceback.format_exc())
-            return False, None, None, None, failure_reason
+        return False, None, None, None, failure_reason
 
 
 if __name__ == "__main__":

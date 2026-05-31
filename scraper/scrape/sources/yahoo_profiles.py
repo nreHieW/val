@@ -85,7 +85,11 @@ def compute_ebitda(statement: pd.DataFrame, start=0, count=4):
 
 
 def get_ttm_financials(ticker, yahoo_snapshot=None):
-    sec_financials = get_sec_ttm_financials(ticker)
+    try:
+        sec_financials = get_sec_ttm_financials(ticker)
+    except Exception as e:
+        logger.warning("%s SEC TTM skipped: %s", ticker, e)
+        return None
 
     try:
         if yahoo_snapshot is not None:
@@ -96,60 +100,38 @@ def get_ttm_financials(ticker, yahoo_snapshot=None):
             quarterly_income_stmt = normalize_quarterly_statement(yahoo_ticker.quarterly_income_stmt)
             quarterly_cashflow = normalize_quarterly_statement(yahoo_ticker.quarterly_cashflow)
         if quarterly_income_stmt.empty:
-            return None
+            logger.warning("%s Yahoo quarterly income statement unavailable", ticker)
+            return {**sec_financials, "EBITDA TTM": None, "EBITDA Prev TTM": None, "Free Cash Flow TTM": None}
 
         most_recent_quarter = quarterly_income_stmt.columns[0]
         result = {
-            "Ticker": ticker,
-            "Revenue TTM": sum_statement_metric(
-                quarterly_income_stmt,
-                ["Total Revenue", "Operating Revenue", "Revenue"],
-            ),
-            "Revenue Prev TTM": sum_statement_metric(
-                quarterly_income_stmt,
-                ["Total Revenue", "Operating Revenue", "Revenue"],
-                start=4,
-                count=4,
-            ),
-            "Net Income TTM": sum_statement_metric(
-                quarterly_income_stmt,
-                [
-                    "Net Income Common Stockholders",
-                    "Net Income Including Noncontrolling Interests",
-                    "Net Income",
-                ],
-            ),
-            "Net Income Prev TTM": sum_statement_metric(
-                quarterly_income_stmt,
-                [
-                    "Net Income Common Stockholders",
-                    "Net Income Including Noncontrolling Interests",
-                    "Net Income",
-                ],
-                start=4,
-                count=4,
-            ),
+            **sec_financials,
             "EBITDA TTM": compute_ebitda(quarterly_income_stmt),
             "EBITDA Prev TTM": compute_ebitda(quarterly_income_stmt, start=4, count=4),
-            "EBIT TTM": sum_statement_metric(
-                quarterly_income_stmt,
-                ["EBIT", "Operating Income"],
-            ),
-            "EBIT Prev TTM": sum_statement_metric(
-                quarterly_income_stmt,
-                ["EBIT", "Operating Income"],
-                start=4,
-                count=4,
-            ),
             "Free Cash Flow TTM": sum_statement_metric(quarterly_cashflow, ["Free Cash Flow"]),
             "TTM Period End": pd.Timestamp(most_recent_quarter).strftime("%Y-%m-%d"),
         }
-        if sec_financials:
-            result.update({key: value for key, value in sec_financials.items() if value is not None})
+
+        for key, value in {
+            "Revenue TTM": sum_statement_metric(quarterly_income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"]),
+            "Net Income TTM": sum_statement_metric(
+                quarterly_income_stmt,
+                ["Net Income Common Stockholders", "Net Income Including Noncontrolling Interests", "Net Income"],
+            ),
+            "EBIT TTM": sum_statement_metric(quarterly_income_stmt, ["EBIT", "Operating Income"]),
+        }.items():
+            if value is None:
+                logger.warning("%s %s unavailable from Yahoo; using SEC value", ticker, key)
+            else:
+                result[key] = value
+
+        for key in ["EBITDA TTM", "EBITDA Prev TTM", "Free Cash Flow TTM"]:
+            if result[key] is None:
+                logger.warning("%s %s unavailable from Yahoo", ticker, key)
         return result
     except Exception as e:
-        logger.debug("%s TTM skipped: %s", ticker, e)
-        return None
+        logger.warning("%s Yahoo latest TTM/cash flow skipped: %s", ticker, e)
+        return {**sec_financials, "EBITDA TTM": None, "EBITDA Prev TTM": None, "Free Cash Flow TTM": None}
 
 
 def compute_ttm_financials(tickers, yahoo_snapshots=None):

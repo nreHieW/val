@@ -39,13 +39,9 @@ def get_cik_for_ticker(ticker):
 
 @lru_cache(maxsize=10000)
 def get_companyfacts(cik):
-    try:
-        response = requests.get(COMPANYFACTS_URL.format(cik=cik), headers=SEC_HEADERS, timeout=30)
-        response.raise_for_status()
-        return response.json()
-    except Exception as exc:
-        logger.debug("SEC companyfacts unavailable for CIK %s: %s", cik, exc)
-        return None
+    response = requests.get(COMPANYFACTS_URL.format(cik=cik), headers=SEC_HEADERS, timeout=30)
+    response.raise_for_status()
+    return response.json()
 
 
 def quarterly_values_for_facts(facts):
@@ -113,14 +109,12 @@ def latest_and_previous_ttm(companyfacts, tags):
 def get_sec_ttm_financials(ticker):
     cik = get_cik_for_ticker(ticker)
     if cik is None:
-        return None
-    companyfacts = get_companyfacts(cik)
-    if not companyfacts:
-        return None
+        raise RuntimeError(f"SEC CIK unavailable for {ticker}")
 
+    companyfacts = get_companyfacts(cik)
     revenue_ttm, revenue_prev_ttm, revenue_quarters = latest_and_previous_ttm(companyfacts, REVENUE_TAGS)
     if revenue_ttm is None or revenue_prev_ttm is None:
-        return None
+        raise RuntimeError(f"SEC revenue TTM unavailable for {ticker}; quarters={len(revenue_quarters)}")
 
     result = {
         "Ticker": ticker,
@@ -130,9 +124,10 @@ def get_sec_ttm_financials(ticker):
     }
 
     for prefix, tags in [("Net Income", NET_INCOME_TAGS), ("EBIT", EBIT_TAGS)]:
-        latest, previous, _ = latest_and_previous_ttm(companyfacts, tags)
-        if latest is not None:
-            result[f"{prefix} TTM"] = latest
-            result[f"{prefix} Prev TTM"] = previous
+        latest, previous, quarters = latest_and_previous_ttm(companyfacts, tags)
+        if latest is None or previous is None:
+            logger.warning("SEC %s TTM unavailable for %s; quarters=%s", prefix, ticker, len(quarters))
+        result[f"{prefix} TTM"] = latest
+        result[f"{prefix} Prev TTM"] = previous
 
     return result

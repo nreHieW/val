@@ -290,7 +290,7 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
       </div>
 
       <div className={isLoadingRows ? "opacity-60 transition-opacity" : "transition-opacity"}>
-        <PeerComparisonPanels rows={rows} mainTicker={normalizedMainTicker} />
+        <PeerComparisonPanels rows={rows} />
       </div>
     </div>
   );

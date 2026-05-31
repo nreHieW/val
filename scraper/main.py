@@ -71,10 +71,15 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
     marketscreener_forecast_failures = 0
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=DCF_MAX_WORKERS) as executor, concurrent.futures.ThreadPoolExecutor(max_workers=MARKETSCREENER_MAX_WORKERS) as marketscreener_executor:
-        for i in range(0, len(tickers), DCF_MAX_WORKERS):
-            logger.info(f"Processing batch {i // DCF_MAX_WORKERS + 1} of {(len(tickers) + DCF_MAX_WORKERS - 1) // DCF_MAX_WORKERS}")
-            batch = tickers[i : i + DCF_MAX_WORKERS]
-            futures = {
+        ticker_iter = iter(tickers)
+        futures = {}
+
+        def submit_next_ticker():
+            try:
+                ticker = next(ticker_iter)
+            except StopIteration:
+                return False
+            futures[
                 executor.submit(
                     process_ticker,
                     ticker,
@@ -87,12 +92,27 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
                     fx_rates,
                     yahoo_snapshots.get(ticker),
                     marketscreener_executor,
-                ): ticker
-                for ticker in batch
-            }
-            for future in concurrent.futures.as_completed(futures):
+                )
+            ] = ticker
+            return True
+
+        for _ in range(min(DCF_MAX_WORKERS, len(tickers))):
+            submit_next_ticker()
+
+        total_batches = (len(tickers) + DCF_MAX_WORKERS - 1) // DCF_MAX_WORKERS
+        if futures:
+            logger.info("Processing batch 1 of %s", total_batches)
+
+        completed_tickers = 0
+        next_batch_to_log = 2
+        while futures:
+            completed, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in completed:
                 ticker = futures[future]
                 success, dcf_inputs, yahoo_profile, yahoo_overview, failure_reason = future.result()
+                del futures[future]
+                completed_tickers += 1
+                submit_next_ticker()
                 if dcf_inputs:
                     if marketscreener_forecast_failed(dcf_inputs):
                         marketscreener_forecast_failures += 1
@@ -109,8 +129,9 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
                         failure_counts[failure_reason] = failure_counts.get(failure_reason, 0) + 1
                     continue
 
-            if i + DCF_MAX_WORKERS < len(tickers):
-                time.sleep(1)
+            while next_batch_to_log <= total_batches and completed_tickers >= (next_batch_to_log - 1) * DCF_MAX_WORKERS:
+                logger.info("Processing batch %s of %s", next_batch_to_log, total_batches)
+                next_batch_to_log += 1
 
     num_errors = sum(failure_counts.values())
     logger.info("DCF scrape completed: %s errors out of %s tickers", num_errors, len(tickers))

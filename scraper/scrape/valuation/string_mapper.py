@@ -1,18 +1,29 @@
+from functools import lru_cache
+
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
 
+@lru_cache(maxsize=1)
+def _get_model():
+    return SentenceTransformer("Alibaba-NLP/gte-base-en-v1.5", trust_remote_code=True)
+
+
 class StringMapper:
     def __init__(self, gts: list, threshold=0):
-        self.model = SentenceTransformer("Alibaba-NLP/gte-base-en-v1.5", trust_remote_code=True)
+        self.model = _get_model()
         self.gts = gts
         self.embeddings = self.model.encode(gts, show_progress_bar=False)
         self.embeddings = self.embeddings / np.linalg.norm(self.embeddings, axis=1)[:, None]
         self.threshold = threshold
 
     def get_closest(self, query: str, num_results=1):
+        return list(self._get_closest(query, num_results))
+
+    @lru_cache(maxsize=10000)
+    def _get_closest(self, query: str, num_results: int):
         if query in self.gts or query.lower() in self.gts:
-            return [query]
+            return (query,)
 
         query_words = set(query.lower().split())
         candidates = []
@@ -22,18 +33,22 @@ class StringMapper:
                 candidates.append(gt)
         if candidates:
             candidates = sorted(candidates, key=lambda x: len(x.split()))
-            return [candidates[0]]
+            return (candidates[0],)
 
         query_embedding = self.model.encode(query, show_progress_bar=False)
         query_embedding = query_embedding / np.linalg.norm(query_embedding)
         similarities = np.dot(self.embeddings, query_embedding)
         indices = np.argsort(-similarities)
         indices = [i for i in indices if similarities[i] > self.threshold][:num_results]
-        return [self.gts[i] for i in indices]
+        return tuple(self.gts[i] for i in indices)
 
     def get_closest_with_scores(self, query: str, num_results=1, indices_to_adjust=None):
+        return list(self._get_closest_with_scores(query, num_results, tuple(indices_to_adjust or ())))
+
+    @lru_cache(maxsize=10000)
+    def _get_closest_with_scores(self, query: str, num_results: int, indices_to_adjust: tuple):
         if query in self.gts or query.lower() in self.gts:
-            return [(query, 1.0)]
+            return ((query, 1.0),)
 
         query_words = set(query.lower().split())
         candidates = []
@@ -43,14 +58,14 @@ class StringMapper:
                 candidates.append(gt)
         if candidates:
             candidates = sorted(candidates, key=lambda x: len(x.split()))
-            return [(candidates[0], 1.0)]
+            return ((candidates[0], 1.0),)
 
         query_embedding = self.model.encode(query, show_progress_bar=False)
         query_embedding = query_embedding / np.linalg.norm(query_embedding)
         scores = np.dot(self.embeddings, query_embedding)
         if indices_to_adjust:
-            scores[indices_to_adjust] += np.max(scores) * 0.1
+            scores[list(indices_to_adjust)] += np.max(scores) * 0.1
 
         indices = np.argsort(-scores)
         indices = [i for i in indices if scores[i] > self.threshold][:num_results]
-        return [(self.gts[i], scores[i]) for i in indices]
+        return tuple((self.gts[i], scores[i]) for i in indices)

@@ -52,10 +52,13 @@ def setup_proxies():
     return proxies
 
 
-PROXIES = setup_proxies()
+PROXIES = None
 
 
 def get_proxy():
+    global PROXIES
+    if PROXIES is None:
+        PROXIES = setup_proxies()
     if len(PROXIES) == 0:
         return None
     idx = np.random.randint(0, len(PROXIES))

@@ -11,19 +11,25 @@ from scrape.sources.yahooquery_adapter import YahooQueryTicker
 
 logger = logging.getLogger(__name__)
 
-YAHOO_TTM_FALLBACK = {
-    "EBITDA TTM": None,
-    "EBITDA Prev TTM": None,
-    "Free Cash Flow TTM": None,
-}
 YAHOO_FINANCIAL_KEYS = [
     "Revenue TTM",
+    "Revenue Prev TTM",
     "Net Income TTM",
+    "Net Income Prev TTM",
     "EBIT TTM",
+    "EBIT Prev TTM",
     "EBITDA TTM",
     "EBITDA Prev TTM",
     "Free Cash Flow TTM",
 ]
+
+
+def with_ttm_defaults(financials):
+    result = {"Ticker": financials.get("Ticker")}
+    result.update(financials)
+    for key in YAHOO_FINANCIAL_KEYS:
+        result.setdefault(key, None)
+    return result
 
 
 @lru_cache(maxsize=10000)
@@ -103,11 +109,11 @@ def get_ttm_financials(ticker, yahoo_snapshot=None, fx_rates=None):
     try:
         sec_financials = get_sec_ttm_financials(ticker)
     except SecRateLimited as e:
-        logger.debug("%s SEC TTM rate limited: %s", ticker, e)
-        return None
+        logger.warning("%s SEC TTM rate limited; using Yahoo latest TTM where available: %s", ticker, e)
+        sec_financials = {"Ticker": ticker}
     except Exception as e:
-        logger.debug("%s SEC TTM skipped: %s", ticker, e)
-        return None
+        logger.debug("%s SEC TTM unavailable; using Yahoo latest TTM where available: %s", ticker, e)
+        sec_financials = {"Ticker": ticker}
 
     try:
         if yahoo_snapshot is not None:
@@ -120,50 +126,74 @@ def get_ttm_financials(ticker, yahoo_snapshot=None, fx_rates=None):
             quarterly_cashflow = normalize_quarterly_statement(yahoo_ticker.quarterly_cashflow)
             ticker_info = get_yahoo_info(ticker) or {}
 
+        result = with_ttm_defaults(sec_financials)
         if quarterly_income_stmt.empty:
-            logger.warning("%s Yahoo quarterly income statement unavailable", ticker)
-            return {**sec_financials, **YAHOO_TTM_FALLBACK}
+            logger.debug("%s Yahoo quarterly income statement unavailable", ticker)
+            return result
 
         most_recent_quarter = quarterly_income_stmt.columns[0]
-        result = {
-            **sec_financials,
-            "EBITDA TTM": compute_ebitda(quarterly_income_stmt),
-            "EBITDA Prev TTM": compute_ebitda(quarterly_income_stmt, start=4, count=4),
-            "Free Cash Flow TTM": sum_statement_metric(quarterly_cashflow, ["Free Cash Flow"]),
-            "TTM Period End": pd.Timestamp(most_recent_quarter).strftime("%Y-%m-%d"),
-        }
+        yahoo_ebitda_ttm = compute_ebitda(quarterly_income_stmt)
+        if yahoo_ebitda_ttm is not None:
+            result["EBITDA TTM"] = yahoo_ebitda_ttm
+        if result.get("EBITDA Prev TTM") is None:
+            yahoo_ebitda_prev_ttm = compute_ebitda(quarterly_income_stmt, start=4, count=4)
+            if yahoo_ebitda_prev_ttm is not None:
+                result["EBITDA Prev TTM"] = yahoo_ebitda_prev_ttm
 
-        for key, value in {
-            "Revenue TTM": sum_statement_metric(quarterly_income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"]),
-            "Net Income TTM": sum_statement_metric(
+        result.update(
+            {
+                "Free Cash Flow TTM": sum_statement_metric(quarterly_cashflow, ["Free Cash Flow"]),
+                "TTM Period End": pd.Timestamp(most_recent_quarter).strftime("%Y-%m-%d"),
+            }
+        )
+
+        yahoo_metrics = {
+            "Revenue": sum_statement_metric(quarterly_income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"]),
+            "Net Income": sum_statement_metric(
                 quarterly_income_stmt,
                 ["Net Income Common Stockholders", "Net Income Including Noncontrolling Interests", "Net Income"],
             ),
-            "EBIT TTM": sum_statement_metric(quarterly_income_stmt, ["EBIT", "Operating Income"]),
-        }.items():
-            if value is None:
-                logger.warning("%s %s unavailable from Yahoo; using SEC value", ticker, key)
-            else:
+            "EBIT": sum_statement_metric(quarterly_income_stmt, ["EBIT", "Operating Income"]),
+        }
+        yahoo_prev_metrics = {
+            "Revenue": sum_statement_metric(
+                quarterly_income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"], start=4, count=4
+            ),
+            "Net Income": sum_statement_metric(
+                quarterly_income_stmt,
+                ["Net Income Common Stockholders", "Net Income Including Noncontrolling Interests", "Net Income"],
+                start=4,
+                count=4,
+            ),
+            "EBIT": sum_statement_metric(quarterly_income_stmt, ["EBIT", "Operating Income"], start=4, count=4),
+        }
+        for prefix, value in yahoo_metrics.items():
+            if value is not None:
+                result[f"{prefix} TTM"] = value
+        for prefix, value in yahoo_prev_metrics.items():
+            key = f"{prefix} Prev TTM"
+            if result.get(key) is None and value is not None:
                 result[key] = value
-
-        for key in ["EBITDA TTM", "EBITDA Prev TTM", "Free Cash Flow TTM"]:
-            if result[key] is None:
-                logger.warning("%s %s unavailable from Yahoo", ticker, key)
 
         financial_currency = ticker_info.get("financialCurrency")
         if financial_currency and financial_currency != "USD":
-            fx_rate = fx_rates[financial_currency]
-            for key in YAHOO_FINANCIAL_KEYS:
-                if result[key] is not None:
-                    result[key] *= fx_rate
-            result["Financial Currency"] = "USD"
-            result["Source Financial Currency"] = financial_currency
-            result["Financial USD FX Rate"] = fx_rate
+            fx_rate = (fx_rates or {}).get(financial_currency)
+            if fx_rate is None:
+                logger.warning("%s missing %s/USD FX rate; leaving financials in source currency", ticker, financial_currency)
+                result["Financial Currency"] = financial_currency
+                result["Source Financial Currency"] = financial_currency
+            else:
+                for key in YAHOO_FINANCIAL_KEYS:
+                    if result[key] is not None:
+                        result[key] *= fx_rate
+                result["Financial Currency"] = "USD"
+                result["Source Financial Currency"] = financial_currency
+                result["Financial USD FX Rate"] = fx_rate
 
         return result
     except Exception as e:
         logger.warning("%s Yahoo latest TTM/cash flow skipped: %s", ticker, e)
-        return {**sec_financials, **YAHOO_TTM_FALLBACK}
+        return with_ttm_defaults(sec_financials)
 
 
 def compute_ttm_financials(tickers, yahoo_snapshots=None, fx_rates=None):
@@ -188,6 +218,14 @@ def compute_ttm_financials(tickers, yahoo_snapshots=None, fx_rates=None):
     missing_count = len(tickers) - len(ttm_financials_by_ticker)
     if missing_count:
         logger.warning("TTM financials missing for %s out of %s tickers", missing_count, len(tickers))
+
+    unavailable_count = sum(
+        1
+        for ticker in tickers
+        if not any(ttm_financials_by_ticker.get(ticker, {}).get(key) is not None for key in YAHOO_FINANCIAL_KEYS)
+    )
+    if unavailable_count:
+        logger.warning("TTM financials unavailable from SEC/Yahoo for %s out of %s tickers", unavailable_count, len(tickers))
 
     ordered_financials = [ttm_financials_by_ticker[ticker] for ticker in tickers if ticker in ttm_financials_by_ticker]
     if not ordered_financials:

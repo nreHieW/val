@@ -17,13 +17,67 @@ SEC_HEADERS = {
 TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
 COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 
-REVENUE_TAGS = ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet"]
-NET_INCOME_TAGS = ["NetIncomeLoss", "ProfitLoss"]
-EBIT_TAGS = ["OperatingIncomeLoss", "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest"]
+FACT_SPECS = {
+    "Revenue": {
+        "preferred": ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet"],
+        "include_any": [("revenue",), ("sales",)],
+        "exclude_any": [
+            "cost",
+            "expense",
+            "deferred",
+            "unearned",
+            "contract liability",
+            "remaining performance",
+            "tax",
+            "interest income",
+            "noninterest income",
+            "investment income",
+            "other income",
+            "gain",
+            "per share",
+            "securities",
+            "proceeds",
+            "commission",
+            "pro forma",
+        ],
+    },
+    "Net Income": {
+        "preferred": ["NetIncomeLoss", "ProfitLoss"],
+        "include_any": [("net", "income"), ("profit", "loss")],
+        "exclude_any": ["per share", "available to common", "attributable", "comprehensive", "before", "tax"],
+    },
+    "EBIT": {
+        "preferred": [
+            "OperatingIncomeLoss",
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+        ],
+        "include_any": [("operating", "income"), ("income", "before", "tax")],
+        "exclude_any": ["per share", "comprehensive", "nonoperating", "interest income"],
+    },
+    "EBITDA": {
+        "preferred": [
+            "EarningsBeforeInterestTaxesDepreciationAndAmortization",
+            "IncomeLossFromContinuingOperationsBeforeInterestExpenseInterestIncomeIncomeTaxesExtraordinaryItemsNoncontrollingInterestsNetOfTaxDepreciationDepletionAndAmortization",
+        ],
+        "include_any": [("ebitda",), ("earnings", "before", "interest", "tax", "depreciation")],
+        "exclude_any": ["adjusted", "margin", "per share"],
+    },
+    "Depreciation & Amortization": {
+        "preferred": [
+            "DepreciationDepletionAndAmortization",
+            "DepreciationAndAmortization",
+            "DepreciationAmortizationAndAccretionNet",
+            "DepreciationDepletionAndAmortizationPropertyPlantAndEquipment",
+        ],
+        "include_any": [("depreciation", "amortization"), ("depreciation", "depletion", "amortization")],
+        "exclude_any": ["accumulated", "assets", "property plant", "schedule", "policy", "useful life", "exploration"],
+    },
+}
 
-SEC_REQUEST_MIN_INTERVAL_SECONDS = 0.25
-SEC_REQUEST_JITTER_SECONDS = 0.1
-SEC_RETRIES = 4
+MAX_FACT_AGE_DAYS = 540
+SEC_REQUEST_MIN_INTERVAL_SECONDS = 1.0
+SEC_REQUEST_JITTER_SECONDS = 0.25
+SEC_RETRIES = 6
 SEC_RETRY_SLEEP_SECONDS = 30
 
 _sec_limiter = RateLimiter(SEC_REQUEST_MIN_INTERVAL_SECONDS, SEC_REQUEST_JITTER_SECONDS)
@@ -57,7 +111,7 @@ def _sec_get_json(url):
             sleep_seconds = float(retry_after) if retry_after else SEC_RETRY_SLEEP_SECONDS * (attempt + 1)
         except ValueError:
             sleep_seconds = SEC_RETRY_SLEEP_SECONDS * (attempt + 1)
-        logger.debug("SEC rate limited; retrying in %.1fs", sleep_seconds)
+        logger.info("SEC rate limited; retrying in %.1fs", sleep_seconds)
         time.sleep(max(0.0, sleep_seconds))
 
     raise SecRateLimited(f"SEC 429 after {SEC_RETRIES} attempts for {url}")
@@ -129,46 +183,75 @@ def quarterly_values_for_facts(facts):
     return sorted(quarters, key=lambda q: q["end"], reverse=True)
 
 
-def quarterly_values(companyfacts, tags):
+def quarterly_values(companyfacts, spec):
     candidates = []
-    us_gaap = companyfacts.get("facts", {}).get("us-gaap", {})
-    for tag in tags:
-        facts = us_gaap.get(tag, {}).get("units", {}).get("USD") or []
-        quarters = quarterly_values_for_facts(facts)
-        if quarters:
-            candidates.append(quarters)
-    return max(candidates, key=lambda qs: (qs[0]["end"], len(qs))) if candidates else []
+    preferred_tags = set(spec["preferred"])
+    for taxonomy, facts_by_tag in companyfacts.get("facts", {}).items():
+        if taxonomy == "dei":
+            continue
+        for tag, fact_definition in facts_by_tag.items():
+            if tag not in preferred_tags:
+                text = " ".join(
+                    str(value)
+                    for value in [tag, fact_definition.get("label"), fact_definition.get("description")]
+                    if value
+                ).lower()
+                if any(excluded in text for excluded in spec["exclude_any"]):
+                    continue
+                if not any(all(term in text for term in terms) for terms in spec["include_any"]):
+                    continue
+
+            quarters = quarterly_values_for_facts(fact_definition.get("units", {}).get("USD") or [])
+            if not quarters:
+                continue
+            age_days = days_between(quarters[0].get("end"), date.today().isoformat())
+            if age_days is not None and age_days <= MAX_FACT_AGE_DAYS:
+                candidates.append(((taxonomy, tag), quarters))
+
+    preferred = [candidate for candidate in candidates if candidate[0][1] in preferred_tags]
+    candidates = preferred or [candidate for candidate in candidates if candidate[0][1] not in preferred_tags]
+    if not candidates:
+        return []
+    _tag, quarters = max(candidates, key=lambda candidate: (candidate[1][0]["end"], len(candidate[1])))
+    return quarters
 
 
-def latest_and_previous_ttm(companyfacts, tags):
-    quarters = quarterly_values(companyfacts, tags)
-    if len(quarters) < 8:
-        return None, None, quarters
-    return sum(q["val"] for q in quarters[:4]), sum(q["val"] for q in quarters[4:8]), quarters
+def latest_and_previous_ttm(companyfacts, spec):
+    quarters = quarterly_values(companyfacts, spec)
+    latest = sum(q["val"] for q in quarters[:4]) if len(quarters) >= 4 else None
+    previous = sum(q["val"] for q in quarters[4:8]) if len(quarters) >= 8 else None
+    return latest, previous, quarters
 
 
 def get_sec_ttm_financials(ticker):
     cik = get_cik_for_ticker(ticker)
     if cik is None:
-        raise RuntimeError(f"SEC CIK unavailable for {ticker}")
+        return {"Ticker": ticker}
 
     companyfacts = get_companyfacts(cik)
-    revenue_ttm, revenue_prev_ttm, revenue_quarters = latest_and_previous_ttm(companyfacts, REVENUE_TAGS)
-    if revenue_ttm is None or revenue_prev_ttm is None:
-        raise RuntimeError(f"SEC revenue TTM unavailable for {ticker}; quarters={len(revenue_quarters)}")
-
+    revenue_ttm, revenue_prev_ttm, revenue_quarters = latest_and_previous_ttm(companyfacts, FACT_SPECS["Revenue"])
     result = {
         "Ticker": ticker,
         "Revenue TTM": revenue_ttm,
         "Revenue Prev TTM": revenue_prev_ttm,
-        "TTM Period End": revenue_quarters[0]["end"],
+        "TTM Period End": revenue_quarters[0]["end"] if revenue_quarters else None,
     }
 
-    for prefix, tags in [("Net Income", NET_INCOME_TAGS), ("EBIT", EBIT_TAGS)]:
-        latest, previous, quarters = latest_and_previous_ttm(companyfacts, tags)
-        if latest is None or previous is None:
-            logger.debug("SEC %s TTM unavailable for %s; quarters=%s", prefix, ticker, len(quarters))
+    for prefix in ["Net Income", "EBIT"]:
+        latest, previous, _quarters = latest_and_previous_ttm(companyfacts, FACT_SPECS[prefix])
         result[f"{prefix} TTM"] = latest
         result[f"{prefix} Prev TTM"] = previous
+
+    ebitda_ttm, ebitda_prev_ttm, _quarters = latest_and_previous_ttm(companyfacts, FACT_SPECS["EBITDA"])
+    depreciation_ttm, depreciation_prev_ttm, _quarters = latest_and_previous_ttm(
+        companyfacts, FACT_SPECS["Depreciation & Amortization"]
+    )
+    result["EBITDA TTM"] = ebitda_ttm
+    if result["EBITDA TTM"] is None and result["EBIT TTM"] is not None and depreciation_ttm is not None:
+        result["EBITDA TTM"] = result["EBIT TTM"] + depreciation_ttm
+
+    result["EBITDA Prev TTM"] = ebitda_prev_ttm
+    if result["EBITDA Prev TTM"] is None and result["EBIT Prev TTM"] is not None and depreciation_prev_ttm is not None:
+        result["EBITDA Prev TTM"] = result["EBIT Prev TTM"] + depreciation_prev_ttm
 
     return result

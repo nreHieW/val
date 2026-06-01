@@ -105,15 +105,38 @@ def compute_ebitda(statement: pd.DataFrame, start=0, count=4):
     return ebit + depreciation
 
 
-def get_ttm_financials(ticker, yahoo_snapshot=None, fx_rates=None):
+def _get_sec_ttm_financials_with_fallback(ticker):
     try:
-        sec_financials = get_sec_ttm_financials(ticker)
+        return get_sec_ttm_financials(ticker)
     except SecRateLimited as e:
         logger.warning("%s SEC TTM rate limited; using Yahoo latest TTM where available: %s", ticker, e)
-        sec_financials = {"Ticker": ticker}
     except Exception as e:
         logger.debug("%s SEC TTM unavailable; using Yahoo latest TTM where available: %s", ticker, e)
-        sec_financials = {"Ticker": ticker}
+    return {"Ticker": ticker}
+
+
+def prefetch_sec_ttm_financials(tickers, cancel_event=None):
+    started = time.monotonic()
+    sec_financials_by_ticker = {}
+    for i in range(0, len(tickers), YAHOO_INFO_MAX_WORKERS):
+        if cancel_event is not None and cancel_event.is_set():
+            logger.info("SEC TTM prefetch cancelled after %s tickers", len(sec_financials_by_ticker))
+            break
+        batch = tickers[i : i + YAHOO_INFO_MAX_WORKERS]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_INFO_MAX_WORKERS) as executor:
+            results = list(executor.map(_get_sec_ttm_financials_with_fallback, batch))
+        for result in results:
+            sec_financials_by_ticker[result["Ticker"]] = result
+
+        if i + YAHOO_INFO_MAX_WORKERS < len(tickers):
+            time.sleep(1)
+
+    logger.info("SEC TTM prefetch completed: %s tickers in %.1fs", len(sec_financials_by_ticker), time.monotonic() - started)
+    return sec_financials_by_ticker
+
+
+def get_ttm_financials(ticker, yahoo_snapshot=None, fx_rates=None, sec_financials=None):
+    sec_financials = sec_financials or _get_sec_ttm_financials_with_fallback(ticker)
 
     try:
         if yahoo_snapshot is not None:
@@ -196,15 +219,21 @@ def get_ttm_financials(ticker, yahoo_snapshot=None, fx_rates=None):
         return with_ttm_defaults(sec_financials)
 
 
-def compute_ttm_financials(tickers, yahoo_snapshots=None, fx_rates=None):
+def compute_ttm_financials(tickers, yahoo_snapshots=None, fx_rates=None, sec_financials_by_ticker=None):
     yahoo_snapshots = yahoo_snapshots or {}
+    sec_financials_by_ticker = sec_financials_by_ticker or prefetch_sec_ttm_financials(tickers)
     ttm_financials_by_ticker = {}
     for i in range(0, len(tickers), YAHOO_INFO_MAX_WORKERS):
         batch = tickers[i : i + YAHOO_INFO_MAX_WORKERS]
         with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_INFO_MAX_WORKERS) as executor:
             results = list(
                 executor.map(
-                    lambda ticker: get_ttm_financials(ticker, yahoo_snapshots.get(ticker), fx_rates),
+                    lambda ticker: get_ttm_financials(
+                        ticker,
+                        yahoo_snapshots.get(ticker),
+                        fx_rates,
+                        sec_financials_by_ticker.get(ticker),
+                    ),
                     batch,
                 )
             )
@@ -212,7 +241,7 @@ def compute_ttm_financials(tickers, yahoo_snapshots=None, fx_rates=None):
             if result:
                 ttm_financials_by_ticker[result["Ticker"]] = result
 
-        if i + YAHOO_INFO_MAX_WORKERS < len(tickers):
+        if i + YAHOO_INFO_MAX_WORKERS < len(tickers) and any(ticker not in yahoo_snapshots for ticker in batch):
             time.sleep(1)
 
     missing_count = len(tickers) - len(ttm_financials_by_ticker)

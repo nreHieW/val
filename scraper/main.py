@@ -2,6 +2,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import threading
 import time
 import traceback
 from collections import Counter
@@ -16,7 +17,7 @@ from scrape.core.mongo import get_mongo_client
 from scrape.core.tickers import get_all_tickers
 from scrape.sources.marketscreener import load_marketscreener_cache, log_marketscreener_stats, save_marketscreener_cache
 from scrape.sources.yahoo_market_discovery import get_sector_industries, get_similar_companies
-from scrape.sources.yahoo_profiles import compute_ttm_financials, get_and_parse_yahoo
+from scrape.sources.yahoo_profiles import compute_ttm_financials, get_and_parse_yahoo, prefetch_sec_ttm_financials
 from scrape.sources.yahoo_snapshot import get_yahoo_snapshots
 from scrape.valuation.dcf_inputs import MissingFinancialStatements, get_dcf_inputs
 from scrape.valuation.market_metrics import (
@@ -270,10 +271,20 @@ def run_market_discovery_scrape(tickers, client, yahoo_snapshots=None, include_s
     logger.info("Industry records saved: %s", len(industry_records))
 
 
-def run_comps_scrape(tickers, client, cached_yahoo_profiles=None, yahoo_snapshots=None):
+def run_comps_scrape(tickers, client, cached_yahoo_profiles=None, yahoo_snapshots=None, sec_ttm_future=None):
     yahoo_df = get_and_parse_yahoo(tickers, cached_profiles=cached_yahoo_profiles, yahoo_snapshots=yahoo_snapshots)
     fx_rates = get_exchange_rates()
-    ttm_financials_df = compute_ttm_financials(tickers, yahoo_snapshots=yahoo_snapshots, fx_rates=fx_rates)
+    sec_financials_by_ticker = None
+    if sec_ttm_future is not None:
+        wait_started = time.monotonic()
+        sec_financials_by_ticker = sec_ttm_future.result()
+        logger.info("SEC TTM prefetch wait during comps: %.1fs", time.monotonic() - wait_started)
+    ttm_financials_df = compute_ttm_financials(
+        tickers,
+        yahoo_snapshots=yahoo_snapshots,
+        fx_rates=fx_rates,
+        sec_financials_by_ticker=sec_financials_by_ticker,
+    )
 
     db = client[os.getenv("MONGODB_DB_NAME")]["financials"]
     operations = []
@@ -303,10 +314,17 @@ def main():
     client = get_mongo_client()
     load_marketscreener_cache()
     try:
-        yahoo_snapshots = _log_timing("Yahoo snapshot scrape", get_yahoo_snapshots, tickers)
-        yahoo_profiles = _log_timing("DCF scrape", run_dcf_scrape, tickers, client, yahoo_snapshots)
-        logger.info("Running comps scrape")
-        _log_timing("Comps scrape", run_comps_scrape, tickers, client, yahoo_profiles, yahoo_snapshots)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as sec_executor:
+            sec_cancel_event = threading.Event()
+            logger.info("Starting SEC TTM prefetch for %s tickers", len(tickers))
+            sec_ttm_future = sec_executor.submit(prefetch_sec_ttm_financials, tickers, sec_cancel_event)
+            try:
+                yahoo_snapshots = _log_timing("Yahoo snapshot scrape", get_yahoo_snapshots, tickers)
+                yahoo_profiles = _log_timing("DCF scrape", run_dcf_scrape, tickers, client, yahoo_snapshots)
+                logger.info("Running comps scrape")
+                _log_timing("Comps scrape", run_comps_scrape, tickers, client, yahoo_profiles, yahoo_snapshots, sec_ttm_future)
+            finally:
+                sec_cancel_event.set()
         include_sector_industries = os.getenv("RUN_SECTOR_INDUSTRY_SCRAPE", "1") != "0"
         _log_timing(
             "Market discovery scrape",

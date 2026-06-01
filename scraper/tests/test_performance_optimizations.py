@@ -13,7 +13,7 @@ import numpy as np
 import main
 from scrape.core import http_utils
 from scrape.core.rate_limit import RateLimiter
-from scrape.sources import marketscreener, yahoo_snapshot
+from scrape.sources import marketscreener, yahoo_profiles, yahoo_snapshot
 from scrape.valuation import dcf_inputs, string_mapper
 
 
@@ -267,6 +267,47 @@ class PerformanceOptimizationTests(unittest.TestCase):
             impersonate="chrome124",
             timeout=http_utils.REQUEST_TIMEOUT_SECONDS,
         )
+
+    def test_ttm_financials_reuses_prefetched_sec_data(self):
+        prefetched = {"Ticker": "A", "Revenue TTM": 123}
+        with (
+            patch.object(yahoo_profiles, "_get_sec_ttm_financials_with_fallback") as get_sec_financials,
+            patch.object(yahoo_profiles, "YAHOO_INFO_MAX_WORKERS", 1),
+        ):
+            result = yahoo_profiles.compute_ttm_financials(
+                ["A"],
+                yahoo_snapshots={"A": Mock(quarterly_income_stmt=yahoo_profiles.pd.DataFrame())},
+                sec_financials_by_ticker={"A": prefetched},
+            )
+
+        get_sec_financials.assert_not_called()
+        self.assertEqual(result.loc["A", "Revenue TTM"], 123)
+
+    def test_ttm_financials_does_not_pause_between_snapshot_only_batches(self):
+        snapshots = {
+            ticker: Mock(quarterly_income_stmt=yahoo_profiles.pd.DataFrame())
+            for ticker in ["A", "B"]
+        }
+        with (
+            patch.object(yahoo_profiles, "YAHOO_INFO_MAX_WORKERS", 1),
+            patch.object(yahoo_profiles.time, "sleep") as sleep,
+        ):
+            yahoo_profiles.compute_ttm_financials(
+                ["A", "B"],
+                yahoo_snapshots=snapshots,
+                sec_financials_by_ticker={"A": {"Ticker": "A"}, "B": {"Ticker": "B"}},
+            )
+
+        sleep.assert_not_called()
+
+    def test_sec_ttm_prefetch_stops_before_next_batch_when_cancelled(self):
+        cancelled = threading.Event()
+        cancelled.set()
+        with patch.object(yahoo_profiles, "_get_sec_ttm_financials_with_fallback") as get_sec_financials:
+            result = yahoo_profiles.prefetch_sec_ttm_financials(["A"], cancelled)
+
+        get_sec_financials.assert_not_called()
+        self.assertEqual(result, {})
 
     def test_yahoo_snapshots_are_chunked_and_paced(self):
         with (

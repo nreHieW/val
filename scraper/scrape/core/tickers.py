@@ -22,11 +22,12 @@ _EXCLUDED_NAME_FRAGMENTS = (
     " debenture",
     " etf",
     " etn",
+    " exchange-traded note",
     " fund",
     " trust",
-    " acquisition corp",
-    " acquisition company",
-    " acquisition corporation",
+    "acquisition",
+    " blank check",
+    " special purpose",
     " spac",
 )
 def _read_pipe_table(url):

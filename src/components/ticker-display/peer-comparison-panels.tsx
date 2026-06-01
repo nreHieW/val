@@ -107,12 +107,24 @@ function SectionHeading({ children }: { children: ReactNode }) {
   );
 }
 
-function PeerRow({ row, value, children }: { row: FinancialComparisonRow; value: ReactNode; children: ReactNode }) {
+function PeerRow({
+  row,
+  value,
+  children,
+  className = ROW_GRID,
+  valueClassName = "",
+}: {
+  row: FinancialComparisonRow;
+  value: ReactNode;
+  children: ReactNode;
+  className?: string;
+  valueClassName?: string;
+}) {
   return (
-    <div className={`${ROW_GRID} group py-1`}>
+    <div className={`${className} group py-1`}>
       <span className="truncate text-xxs tabular-nums text-muted-foreground sm:text-xs">{row.Ticker}</span>
       <div className="min-w-0">{children}</div>
-      <span className="text-right text-xxs tabular-nums text-muted-foreground sm:text-xs">{value}</span>
+      <span className={`whitespace-nowrap text-right text-xxs tabular-nums text-muted-foreground sm:text-xs ${valueClassName}`}>{value}</span>
     </div>
   );
 }
@@ -290,7 +302,13 @@ function PeRangeBlock({
           const right = hasRange ? position(range.high!, rangeDomain) : left;
 
           return (
-            <PeerRow key={row.Ticker} row={row} value={formatPeRange(range)}>
+            <PeerRow
+              key={row.Ticker}
+              row={row}
+              value={formatPeRange(range)}
+              className="grid grid-cols-[minmax(3rem,3.75rem)_minmax(2rem,1fr)_max-content] items-center gap-x-3"
+              valueClassName="tracking-tight"
+            >
               <ChartTrack>
                 <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-border" />
                 {hasRange && (

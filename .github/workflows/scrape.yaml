@@ -57,7 +57,7 @@ jobs:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
           SCRAPE_CHUNK_COUNT: "6"
           SCRAPE_CHUNK_INDEX: ${{ matrix.chunk_index }}
-          SCRAPE_CHUNK_SIZE: "900"
+          SCRAPE_CHUNK_SIZE: "920"
           RUN_SECTOR_INDUSTRY_SCRAPE: ${{ matrix.run_sector_industries }}
           TQDM_DISABLE: "1"
         run: uv run main.py

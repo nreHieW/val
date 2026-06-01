@@ -6,12 +6,22 @@ from dataclasses import dataclass
 import pandas as pd
 from yahooquery import Ticker
 
-from scrape.core.config import YAHOOQUERY_BATCH_SIZE, YAHOOQUERY_BATCH_SLEEP_SECONDS, YAHOOQUERY_MAX_WORKERS
+from scrape.core.config import (
+    YAHOOQUERY_BATCH_SIZE,
+    YAHOOQUERY_BATCH_SLEEP_SECONDS,
+    YAHOOQUERY_FAILURE_COOLDOWN_SECONDS,
+    YAHOOQUERY_MAX_CONSECUTIVE_EMPTY_BATCHES,
+    YAHOOQUERY_MAX_WORKERS,
+)
 from scrape.sources.yahoo_profiles import normalize_quarterly_statement
 from scrape.sources.yahooquery_adapter import INFO_MODULES, YahooQueryTicker, statement_to_wide_shape
 
 logger = logging.getLogger(__name__)
 _PROGRESS_INTERVAL_BATCHES = 10
+
+
+class YahooSnapshotRejected(RuntimeError):
+    pass
 
 
 @dataclass
@@ -86,12 +96,26 @@ def _get_yahoo_snapshot_batch(batch: list[str]) -> dict[str, YahooSnapshot]:
 def get_yahoo_snapshots(tickers: list[str]) -> dict[str, YahooSnapshot]:
     snapshots: dict[str, YahooSnapshot] = {}
     total_batches = (len(tickers) + YAHOOQUERY_BATCH_SIZE - 1) // YAHOOQUERY_BATCH_SIZE
+    consecutive_empty_batches = 0
     for i in range(0, len(tickers), YAHOOQUERY_BATCH_SIZE):
         batch_number = i // YAHOOQUERY_BATCH_SIZE + 1
         batch = tickers[i : i + YAHOOQUERY_BATCH_SIZE]
         batch_started = time.monotonic()
         batch_snapshots = _get_yahoo_snapshot_batch(batch)
+        if not batch_snapshots:
+            logger.warning(
+                "Yahoo snapshot batch %s of %s returned no snapshots; cooling down for %.1fs before one retry",
+                batch_number,
+                total_batches,
+                YAHOOQUERY_FAILURE_COOLDOWN_SECONDS,
+            )
+            time.sleep(YAHOOQUERY_FAILURE_COOLDOWN_SECONDS)
+            batch_snapshots = _get_yahoo_snapshot_batch(batch)
         snapshots.update(batch_snapshots)
+        if batch_snapshots:
+            consecutive_empty_batches = 0
+        else:
+            consecutive_empty_batches += 1
         if len(batch_snapshots) != len(batch) or batch_number % _PROGRESS_INTERVAL_BATCHES == 0 or batch_number == total_batches:
             log = logger.warning if len(batch_snapshots) != len(batch) else logger.info
             log(
@@ -102,6 +126,10 @@ def get_yahoo_snapshots(tickers: list[str]) -> dict[str, YahooSnapshot]:
                 len(batch),
                 len(snapshots),
                 time.monotonic() - batch_started,
+            )
+        if consecutive_empty_batches >= YAHOOQUERY_MAX_CONSECUTIVE_EMPTY_BATCHES:
+            raise YahooSnapshotRejected(
+                f"Yahoo rejected {consecutive_empty_batches} consecutive snapshot batches; stopping before database writes"
             )
         if i + YAHOOQUERY_BATCH_SIZE < len(tickers):
             time.sleep(YAHOOQUERY_BATCH_SLEEP_SECONDS)

@@ -78,6 +78,25 @@ class PerformanceOptimizationTests(unittest.TestCase):
         self.assertCountEqual(started, [0, 1, 2])
         self.assertLess(started[2], finished[0])
 
+    def test_ticker_chunks_cover_the_full_list_without_overlap(self):
+        tickers = list(range(4206))
+        chunks = []
+        for chunk_index in range(5):
+            with patch.dict(
+                os.environ,
+                {"SCRAPE_CHUNK_COUNT": "5", "SCRAPE_CHUNK_INDEX": str(chunk_index)},
+            ):
+                chunks.append(main._get_ticker_chunk(tickers))
+
+        self.assertEqual([len(chunk) for chunk in chunks], [842, 842, 842, 842, 838])
+        self.assertEqual([ticker for chunk in chunks for ticker in chunk], tickers)
+
+    def test_sector_industry_scrape_can_be_deferred_to_the_final_chunk(self):
+        with patch.object(main, "get_sector_industries") as get_sector_industries:
+            main.run_market_discovery_scrape([], _Client(), include_sector_industries=False)
+
+        get_sector_industries.assert_not_called()
+
     def test_marketscreener_requests_are_paced_and_reuse_sessions(self):
         with (
             patch.object(marketscreener._MARKETSCREENER_LIMITER, "wait") as wait,
@@ -176,6 +195,37 @@ class PerformanceOptimizationTests(unittest.TestCase):
 
         self.assertIn("1 of 2 snapshots collected", logs.output[0])
         self.assertIn("Yahoo snapshots missing for 1 out of 2 tickers", logs.output[1])
+
+    def test_yahoo_snapshot_empty_batch_cools_down_and_retries_once(self):
+        with (
+            patch.object(yahoo_snapshot, "YAHOOQUERY_BATCH_SIZE", 2),
+            patch.object(yahoo_snapshot, "YAHOOQUERY_FAILURE_COOLDOWN_SECONDS", 30),
+            patch.object(yahoo_snapshot, "_get_yahoo_snapshot_batch", side_effect=[{}, {"A": "A", "B": "B"}]) as get_batch,
+            patch.object(yahoo_snapshot.time, "sleep") as sleep,
+        ):
+            snapshots = yahoo_snapshot.get_yahoo_snapshots(["A", "B"])
+
+        self.assertEqual(snapshots, {"A": "A", "B": "B"})
+        self.assertEqual(get_batch.call_args_list, [call(["A", "B"]), call(["A", "B"])])
+        sleep.assert_called_once_with(30)
+
+    def test_yahoo_snapshot_repeated_empty_batches_abort_before_fallback(self):
+        with (
+            patch.object(yahoo_snapshot, "YAHOOQUERY_BATCH_SIZE", 2),
+            patch.object(yahoo_snapshot, "YAHOOQUERY_BATCH_SLEEP_SECONDS", 1),
+            patch.object(yahoo_snapshot, "YAHOOQUERY_FAILURE_COOLDOWN_SECONDS", 30),
+            patch.object(yahoo_snapshot, "YAHOOQUERY_MAX_CONSECUTIVE_EMPTY_BATCHES", 2),
+            patch.object(yahoo_snapshot, "_get_yahoo_snapshot_batch", return_value={}) as get_batch,
+            patch.object(yahoo_snapshot.time, "sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(yahoo_snapshot.YahooSnapshotRejected, "stopping before database writes"):
+                yahoo_snapshot.get_yahoo_snapshots(["A", "B", "C", "D", "E"])
+
+        self.assertEqual(
+            get_batch.call_args_list,
+            [call(["A", "B"]), call(["A", "B"]), call(["C", "D"]), call(["C", "D"])],
+        )
+        self.assertEqual(sleep.call_args_list, [call(30), call(1), call(30)])
 
     def test_timeout_signals_cooperative_cancellation(self):
         cancelled = threading.Event()

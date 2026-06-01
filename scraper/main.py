@@ -62,6 +62,21 @@ def _log_dcf_progress(batch, total_batches, completed_tickers, total_tickers, st
     )
 
 
+def _get_ticker_chunk(tickers):
+    chunk_count = int(os.getenv("SCRAPE_CHUNK_COUNT", "1"))
+    chunk_index = int(os.getenv("SCRAPE_CHUNK_INDEX", "0"))
+    if chunk_count < 1:
+        raise ValueError("SCRAPE_CHUNK_COUNT must be at least 1")
+    if not 0 <= chunk_index < chunk_count:
+        raise ValueError("SCRAPE_CHUNK_INDEX must be between 0 and SCRAPE_CHUNK_COUNT - 1")
+
+    chunk_size = (len(tickers) + chunk_count - 1) // chunk_count
+    start = chunk_index * chunk_size
+    chunk = tickers[start : start + chunk_size]
+    logger.info("Ticker chunk %s of %s loaded: %s tickers", chunk_index + 1, chunk_count, len(chunk))
+    return chunk
+
+
 def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
     yahoo_snapshots = yahoo_snapshots or {}
     logger.info(f"Running DCF scrape for {len(tickers)} tickers")
@@ -190,7 +205,7 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
     return yahoo_profiles
 
 
-def run_market_discovery_scrape(tickers, client, yahoo_snapshots=None):
+def run_market_discovery_scrape(tickers, client, yahoo_snapshots=None, include_sector_industries=True):
     db_name = os.getenv("MONGODB_DB_NAME")
     similar_db = client[db_name]["similar_companies"]
     industries_db = client[db_name]["industries"]
@@ -216,6 +231,10 @@ def run_market_discovery_scrape(tickers, client, yahoo_snapshots=None):
         similar_db.bulk_write(similar_operations, ordered=False)
     if similar_failures:
         logger.warning("Similar companies scrape failures: %s", similar_failures)
+
+    if not include_sector_industries:
+        logger.info("Skipping sector industry scrape for this ticker chunk")
+        return
 
     logger.info("Running sector industry scrape")
     industries = get_sector_industries()
@@ -253,8 +272,9 @@ def run_comps_scrape(tickers, client, cached_yahoo_profiles=None, yahoo_snapshot
 
 def main():
     started = time.monotonic()
-    tickers = get_all_tickers()
-    logger.info("Tickers loaded: %s", len(tickers))
+    all_tickers = get_all_tickers()
+    logger.info("Tickers loaded: %s", len(all_tickers))
+    tickers = _get_ticker_chunk(all_tickers)
     client = get_mongo_client()
     load_marketscreener_cache()
     try:
@@ -262,7 +282,15 @@ def main():
         yahoo_profiles = _log_timing("DCF scrape", run_dcf_scrape, tickers, client, yahoo_snapshots)
         logger.info("Running comps scrape")
         _log_timing("Comps scrape", run_comps_scrape, tickers, client, yahoo_profiles, yahoo_snapshots)
-        _log_timing("Market discovery scrape", run_market_discovery_scrape, tickers, client, yahoo_snapshots)
+        include_sector_industries = os.getenv("RUN_SECTOR_INDUSTRY_SCRAPE", "1") != "0"
+        _log_timing(
+            "Market discovery scrape",
+            run_market_discovery_scrape,
+            tickers,
+            client,
+            yahoo_snapshots,
+            include_sector_industries,
+        )
     finally:
         log_marketscreener_stats()
         save_marketscreener_cache()

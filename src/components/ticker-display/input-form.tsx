@@ -102,6 +102,11 @@ function InputForm({
 
   const consensusRevenues = forecastContext?.consensus_revenues ?? {};
   const consensusEbit = forecastContext?.consensus_ebit ?? {};
+  const hasRevenueConsensus = Object.keys(consensusRevenues).length > 0;
+  const revenueGrowthIsUnverified =
+    !hasRevenueConsensus &&
+    defaults.revenue_growth_rate_next_year === 0 &&
+    defaults.compounded_annual_revenue_growth_rate === 0;
   const sortedConsensusEntries = Object.entries(consensusRevenues).sort(
     ([leftYear], [rightYear]) => Number(leftYear) - Number(rightYear),
   );
@@ -325,6 +330,33 @@ function InputForm({
     return [];
   }
 
+  function renderRevenueQualityIndicator(key: NumericFieldKey) {
+    const isRevenueGrowthField =
+      key === "revenue_growth_rate_next_year" ||
+      key === "compounded_annual_revenue_growth_rate";
+
+    if (!isRevenueGrowthField || !revenueGrowthIsUnverified) {
+      return null;
+    }
+
+    return (
+      <HoverCard>
+        <HoverCardTrigger asChild>
+          <button
+            type="button"
+            className="px-1.5 py-0.5 text-[9px] tracking-wide text-muted-foreground/40 transition-colors hover:text-muted-foreground/60 cursor-help"
+            aria-label="Revenue growth estimate is unverified"
+          >
+            unverified
+          </button>
+        </HoverCardTrigger>
+        <HoverCardContent align="start" className="w-64 text-[11px] leading-relaxed text-muted-foreground">
+          Consensus revenue was unavailable when this model was scraped, so revenue growth defaulted to 0%. Adjust manually or re-scrape before relying on it.
+        </HoverCardContent>
+      </HoverCard>
+    );
+  }
+
   function renderForecastContext(key: NumericFieldKey) {
     const items = getForecastItems(key);
     if (items.length === 0) {
@@ -369,6 +401,7 @@ function InputForm({
                   {item.displayLabel}
                 </FormLabel>
                 <InfoHover text={item.tooltip} />
+                {renderRevenueQualityIndicator(item.key)}
               </div>
               {renderForecastContext(item.key)}
             </div>

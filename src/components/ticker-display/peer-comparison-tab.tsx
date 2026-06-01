@@ -1,22 +1,18 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Plus, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ChevronDown, ChevronUp, Plus, Search, X } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { getTickers } from "../searchbar/search-bar";
 import PeerComparisonPanels from "./peer-comparison-panels";
-import {
-  FinancialComparisonRow,
-  METRICS,
-  MetricKey,
-} from "./peerComparisonHelpers";
+import { FinancialComparisonRow } from "@/lib/financialComparison";
+
+const SUGGESTIONS_PREVIEW_COUNT = 6;
 
 type TickerResult = {
   Ticker: string;
   name: string;
 };
-
-const METRIC_KEY_SET = new Set(METRICS.map((metric) => metric.key));
 
 function parsePeers(raw: string | null, mainTicker: string): string[] {
   if (!raw) return [];
@@ -28,20 +24,6 @@ function parsePeers(raw: string | null, mainTicker: string): string[] {
         .filter((ticker) => ticker.length > 0 && ticker !== mainTicker),
     ),
   );
-}
-
-function parseVisibleMetrics(raw: string | null): MetricKey[] {
-  if (!raw) {
-    return METRICS.map((metric) => metric.key);
-  }
-  const parsed = raw
-    .split(",")
-    .map((value) => value.trim())
-    .filter((value): value is MetricKey => METRIC_KEY_SET.has(value as MetricKey));
-  if (parsed.length === 0) {
-    return METRICS.map((metric) => metric.key);
-  }
-  return Array.from(new Set(parsed));
 }
 
 export default function PeerComparisonTab({ ticker }: { ticker: string }) {
@@ -60,9 +42,6 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
     key: string;
     rows: FinancialComparisonRow[];
   }>({ key: "", rows: [] });
-  const [visibleMetrics, setVisibleMetrics] = useState<MetricKey[]>(() =>
-    parseVisibleMetrics(searchParams.get("metrics")),
-  );
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -125,15 +104,7 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
       params.set("peers", peers.join(","));
     }
 
-    const allMetrics = METRICS.map((metric) => metric.key);
-    const isAllVisible =
-      visibleMetrics.length === allMetrics.length &&
-      allMetrics.every((metric) => visibleMetrics.includes(metric));
-    if (isAllVisible) {
-      params.delete("metrics");
-    } else {
-      params.set("metrics", visibleMetrics.join(","));
-    }
+    params.delete("metrics");
 
     const nextQuery = params.toString();
     const nextUrl = nextQuery ? `${pathname}?${nextQuery}` : pathname;
@@ -142,7 +113,7 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
     if (nextUrl !== currentUrl) {
       router.replace(nextUrl, { scroll: false });
     }
-  }, [pathname, peers, router, searchParams, visibleMetrics]);
+  }, [pathname, peers, router, searchParams]);
 
   useEffect(() => {
     const tickers = [normalizedMainTicker, ...peers];
@@ -176,20 +147,19 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
     return () => controller.abort();
   }, [normalizedMainTicker, peers]);
 
-  const normalizedResults = useMemo(
-    () =>
-      searchResults.filter(
-        (result) =>
-          !peers.includes(result.Ticker.toUpperCase()) &&
-          result.Ticker.toUpperCase() !== normalizedMainTicker,
-      ),
-    [peers, searchResults, normalizedMainTicker],
+  const [showAllSuggestions, setShowAllSuggestions] = useState(false);
+  const normalizedResults = searchResults.filter(
+    (result) =>
+      !peers.includes(result.Ticker.toUpperCase()) &&
+      result.Ticker.toUpperCase() !== normalizedMainTicker,
   );
-
-  const availableSuggestions = useMemo(
-    () => suggestedPeers.filter((peer) => !peers.includes(peer)).slice(0, 40),
-    [peers, suggestedPeers],
-  );
+  const allAvailableSuggestions = suggestedPeers.filter((peer) => !peers.includes(peer)).slice(0, 40);
+  const availableSuggestions = showAllSuggestions
+    ? allAvailableSuggestions
+    : allAvailableSuggestions.slice(0, SUGGESTIONS_PREVIEW_COUNT);
+  const hasMoreSuggestions = allAvailableSuggestions.length > SUGGESTIONS_PREVIEW_COUNT;
+  const SuggestionToggleIcon = showAllSuggestions ? ChevronUp : ChevronDown;
+  const suggestionToggleLabel = showAllSuggestions ? "Show less" : `${allAvailableSuggestions.length - SUGGESTIONS_PREVIEW_COUNT} more`;
 
   function addPeer(tickerToAdd: string) {
     const normalized = tickerToAdd.toUpperCase();
@@ -207,15 +177,6 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
     setPeers((prev) => prev.filter((item) => item !== tickerToRemove));
   }
 
-  function toggleMetric(metric: MetricKey) {
-    setVisibleMetrics((prev) => {
-      const next = prev.includes(metric)
-        ? prev.filter((item) => item !== metric)
-        : [...prev, metric];
-      return next.length === 0 ? prev : next;
-    });
-  }
-
   const showDropdown = searchQuery.length > 0 && normalizedResults.length > 0;
   const showNoResults =
     searchQuery.length > 0 &&
@@ -226,10 +187,10 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
   const isLoadingRows = rowsState.key !== rowsKey;
 
   return (
-    <div className="space-y-6 pt-2">
-      {/* Search & peer chips */}
+    <div className="space-y-8 pt-2">
       <div>
         <div className="relative">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/40" />
           <input
             ref={searchInputRef}
             type="text"
@@ -240,27 +201,27 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
                 addPeer(normalizedResults[0].Ticker);
               }
             }}
-            placeholder="Add a peer company..."
-            className="w-full rounded-md border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground/50 outline-none transition-shadow focus:ring-1 focus:ring-ring"
+            placeholder="Search by ticker or company name"
+            className="w-full rounded-lg border bg-background py-2.5 pl-9 pr-3 text-sm placeholder:text-muted-foreground/40 outline-none transition-all focus:border-foreground/20 focus:ring-1 focus:ring-ring/50"
             spellCheck="false"
             autoCorrect="off"
           />
           {showNoResults && (
-            <p className="absolute left-0 top-full mt-1 text-xs text-muted-foreground">
-              No matching tickers.
+            <p className="absolute left-0 top-full mt-1.5 text-xs text-muted-foreground">
+              No matching tickers
             </p>
           )}
           {showDropdown && (
-            <ul className="absolute left-0 right-0 top-full z-30 mt-1 max-h-48 overflow-auto rounded-md border bg-background shadow-md scrollbar-thin scrollbar-track-transparent scrollbar-thumb-border">
+            <ul className="absolute left-0 right-0 top-full z-30 mt-1 max-h-52 overflow-auto rounded-lg border bg-background shadow-lg scrollbar-thin scrollbar-track-transparent scrollbar-thumb-border">
               {normalizedResults.slice(0, 10).map((result) => (
                 <li key={result.Ticker}>
                   <button
                     type="button"
-                    className="w-full px-3 py-2 text-left text-xs transition-colors hover:bg-muted/60"
+                    className="flex w-full items-center gap-3 px-3 py-2.5 text-left text-xs transition-colors hover:bg-muted/50"
                     onClick={() => addPeer(result.Ticker)}
                   >
-                    <span className="font-medium">{result.Ticker}</span>
-                    <span className="text-muted-foreground"> — {result.name}</span>
+                    <span className="min-w-[3.5rem] font-medium tabular-nums">{result.Ticker}</span>
+                    <span className="truncate text-muted-foreground">{result.name}</span>
                   </button>
                 </li>
               ))}
@@ -268,19 +229,19 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
           )}
         </div>
 
-        <div className={`flex flex-wrap items-center gap-2 ${showNoResults ? "mt-8" : "mt-3"}`}>
-          <span className="inline-flex items-center rounded-md bg-foreground/[0.06] px-2.5 py-1 text-xs font-semibold">
+        <div className={`flex flex-wrap items-center gap-1.5 ${showNoResults ? "mt-8" : "mt-3"}`}>
+          <span className="inline-flex items-center rounded-md bg-foreground px-2.5 py-1 text-xs font-medium text-background">
             {normalizedMainTicker}
           </span>
           {peers.map((peerTicker) => (
             <span
               key={peerTicker}
-              className="group inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs transition-colors"
+              className="group inline-flex items-center gap-1 rounded-md border border-border/60 bg-background px-2.5 py-1 text-xs tabular-nums transition-colors hover:border-foreground/20"
             >
               {peerTicker}
               <button
                 type="button"
-                className="rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                className="-mr-0.5 rounded p-0.5 text-muted-foreground/50 transition-colors hover:text-foreground"
                 onClick={() => removePeer(peerTicker)}
                 aria-label={`Remove ${peerTicker}`}
               >
@@ -291,62 +252,45 @@ export default function PeerComparisonTab({ ticker }: { ticker: string }) {
           {peers.length > 0 && (
             <button
               type="button"
-              className="text-xs text-muted-foreground transition-colors hover:text-foreground"
+              className="ml-1 text-xs text-muted-foreground/50 transition-colors hover:text-foreground"
               onClick={() => setPeers([])}
             >
-              Clear all
+              Clear
             </button>
           )}
         </div>
 
-        {availableSuggestions.length > 0 && (
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <span className="text-xs text-muted-foreground">Suggested:</span>
-            {availableSuggestions.map((peerTicker) => (
-              <button
-                key={peerTicker}
-                type="button"
-                className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-foreground/30 hover:bg-foreground/[0.04] hover:text-foreground"
-                onClick={() => addPeer(peerTicker)}
-              >
-                <Plus className="h-3 w-3" />
-                {peerTicker}
-              </button>
-            ))}
+        {allAvailableSuggestions.length > 0 && (
+          <div className="mt-4">
+            <p className="mb-2 text-xxs font-medium uppercase tracking-wider text-muted-foreground/50">Suggested peers</p>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {availableSuggestions.map((peerTicker) => (
+                <button
+                  key={peerTicker}
+                  type="button"
+                  className="inline-flex items-center gap-1 rounded-md border border-dashed border-border/60 px-2.5 py-1 text-xs tabular-nums text-muted-foreground transition-all hover:border-foreground/25 hover:text-foreground"
+                  onClick={() => addPeer(peerTicker)}
+                >
+                  <Plus className="h-2.5 w-2.5" />
+                  {peerTicker}
+                </button>
+              ))}
+              {hasMoreSuggestions && (
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground/50 transition-colors hover:text-foreground"
+                  onClick={() => setShowAllSuggestions((prev) => !prev)}
+                >
+                  <SuggestionToggleIcon className="h-3 w-3" /> {suggestionToggleLabel}
+                </button>
+              )}
+            </div>
           </div>
         )}
       </div>
 
-      {/* Metric toggles */}
-      <div>
-        <p className="pb-2 text-xs font-medium text-muted-foreground">Metrics</p>
-        <div className="flex flex-wrap gap-1.5">
-          {METRICS.map((metric) => {
-            const isActive = visibleMetrics.includes(metric.key);
-            return (
-              <button
-                key={metric.key}
-                type="button"
-                onClick={() => toggleMetric(metric.key)}
-                className={`rounded-md border px-2 py-1 text-xs transition-colors ${
-                  isActive
-                    ? "border-foreground/20 bg-foreground/[0.06] font-medium text-foreground"
-                    : "border-transparent text-muted-foreground/60 hover:text-muted-foreground"
-                }`}
-              >
-                {metric.label}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
       <div className={isLoadingRows ? "opacity-60 transition-opacity" : "transition-opacity"}>
-        <PeerComparisonPanels
-          rows={rows}
-          mainTicker={normalizedMainTicker}
-          visibleMetrics={visibleMetrics}
-        />
+        <PeerComparisonPanels rows={rows} />
       </div>
     </div>
   );

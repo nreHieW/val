@@ -1,6 +1,8 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 
 import pandas as pd
+
+from scrape.sources.yahooquery_adapter import yahooquery_close_series
 
 
 def _clean_value(value):
@@ -52,6 +54,40 @@ def _extract_earnings_estimates(df: pd.DataFrame):
     }
 
 
+def _historical_pe_range(close: pd.Series, ttm_eps: float | None, days: int):
+    if close.empty or not ttm_eps or ttm_eps <= 0:
+        return None
+    cutoff = pd.Timestamp(datetime.now() - timedelta(days=days))
+    period_close = close[close.index >= cutoff]
+    if period_close.empty:
+        return None
+    pe = (period_close / ttm_eps).replace([float("inf"), float("-inf")], pd.NA).dropna()
+    pe = pe[pe > 0]
+    if pe.empty:
+        return None
+    return {
+        "low": round(float(pe.min()), 2),
+        "mean": round(float(pe.mean()), 2),
+        "high": round(float(pe.max()), 2),
+        "observations": int(pe.count()),
+    }
+
+
+def _get_historical_pe(yahoo_ticker, info: dict, current_price: float | None):
+    trailing_pe = info.get("trailingPE")
+    ttm_eps = info.get("epsTrailingTwelveMonths")
+    if (not ttm_eps or ttm_eps <= 0) and trailing_pe and trailing_pe > 0 and current_price:
+        ttm_eps = current_price / trailing_pe
+    if not ttm_eps or ttm_eps <= 0:
+        return {"90Day": None, "1Year": None}
+
+    close = yahooquery_close_series(yahoo_ticker.history(period="1y", interval="1d"))
+    return {
+        "90Day": _historical_pe_range(close, ttm_eps, 90),
+        "1Year": _historical_pe_range(close, ttm_eps, 365),
+    }
+
+
 def build_yahoo_overview(yahoo_ticker, info: dict):
     symbol = info.get("symbol") or yahoo_ticker.ticker
     current_price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
@@ -65,6 +101,7 @@ def build_yahoo_overview(yahoo_ticker, info: dict):
     target_median = analyst_targets.get("median")
     target_reference = target_median or target_mean
     target_upside = (target_reference / current_price) - 1 if target_reference and current_price else None
+    historical_pe = _get_historical_pe(yahoo_ticker, info, current_price)
 
     return {
         "Ticker": symbol,
@@ -93,6 +130,7 @@ def build_yahoo_overview(yahoo_ticker, info: dict):
             "enterpriseToRevenue": info.get("enterpriseToRevenue"),
             "enterpriseToEbitda": info.get("enterpriseToEbitda"),
             "operatingMargins": info.get("operatingMargins"),
+            "historicalPe": historical_pe,
         },
         "analyst": {
             "targets": {k: _clean_value(analyst_targets.get(k)) for k in ["low", "high", "mean", "median"]},

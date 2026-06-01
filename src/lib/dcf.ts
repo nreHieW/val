@@ -74,6 +74,17 @@ export type DcfOutput = {
   final_components: DcfFinalComponents;
 };
 
+export type ReverseDcfScenario = {
+  implied_value: number | null;
+  validation_value_per_share: number | null;
+  validation_error: number | null;
+};
+
+export type ReverseDcfOutput = {
+  target_price: number;
+  implied_revenue_cagr: ReverseDcfScenario;
+};
+
 function linspace(start: number, end: number, count: number): number[] {
   if (count <= 0) return [];
   if (count === 1) return [start];
@@ -367,6 +378,67 @@ export function dcf(input: DcfInput): DcfOutput {
         input.cross_holdings_and_other_non_operating_assets,
       minority_interest: input.minority_interest,
     },
+  };
+}
+
+const REVERSE_DCF_MIN_CAGR = -0.95;
+const REVERSE_DCF_MAX_CAGR = 1.5;
+const REVERSE_DCF_TOLERANCE = 1e-8;
+
+function valuePerShareAtRevenueGrowth(input: DcfInput, growthRate: number) {
+  return dcf({
+    ...input,
+    revenue_growth_rate_next_year: growthRate,
+    compounded_annual_revenue_growth_rate: growthRate,
+  }).value_per_share;
+}
+
+function solveImpliedRevenueCagr(input: DcfInput): ReverseDcfScenario {
+  const targetPrice = input.curr_price;
+  const diffAt = (growthRate: number) => valuePerShareAtRevenueGrowth(input, growthRate) - targetPrice;
+  const scenario = (implied_value: number | null): ReverseDcfScenario => {
+    if (implied_value == null) {
+      return { implied_value: null, validation_value_per_share: null, validation_error: null };
+    }
+
+    const validation_value_per_share = valuePerShareAtRevenueGrowth(input, implied_value);
+    return {
+      implied_value,
+      validation_value_per_share,
+      validation_error: validation_value_per_share - targetPrice,
+    };
+  };
+
+  let low = REVERSE_DCF_MIN_CAGR;
+  let high = REVERSE_DCF_MAX_CAGR;
+  let lowDiff = diffAt(low);
+  const highDiff = diffAt(high);
+
+  if (Math.abs(lowDiff) <= REVERSE_DCF_TOLERANCE) return scenario(low);
+  if (Math.abs(highDiff) <= REVERSE_DCF_TOLERANCE) return scenario(high);
+  if (lowDiff * highDiff > 0) return scenario(null);
+
+  for (let i = 0; i < 100; i += 1) {
+    const mid = (low + high) / 2;
+    const midDiff = diffAt(mid);
+
+    if (Math.abs(midDiff) <= REVERSE_DCF_TOLERANCE) return scenario(mid);
+
+    if (lowDiff * midDiff <= 0) {
+      high = mid;
+    } else {
+      low = mid;
+      lowDiff = midDiff;
+    }
+  }
+
+  return scenario((low + high) / 2);
+}
+
+export function reverseDcf(input: DcfInput): ReverseDcfOutput {
+  return {
+    target_price: input.curr_price,
+    implied_revenue_cagr: solveImpliedRevenueCagr(input),
   };
 }
 

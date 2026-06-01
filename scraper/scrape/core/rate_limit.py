@@ -23,7 +23,7 @@ class RateLimiter:
         self._lock = threading.Lock()
         self._next_allowed_at = 0.0
 
-    def wait(self) -> None:
+    def wait(self, cancel_event=None) -> None:
         with self._lock:
             now = time.monotonic()
             sleep_seconds = max(0.0, self._next_allowed_at - now)
@@ -33,7 +33,10 @@ class RateLimiter:
             self._next_allowed_at = max(now, self._next_allowed_at) + interval
 
         if sleep_seconds:
-            time.sleep(sleep_seconds)
+            if cancel_event is None:
+                time.sleep(sleep_seconds)
+            elif cancel_event.wait(sleep_seconds):
+                raise TimeoutError("Rate-limited request cancelled")
 
 
 class YahooRateLimiter:

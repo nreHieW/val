@@ -30,6 +30,13 @@ def _browser_session():
     return session
 
 
+def reset_browser_session():
+    session = getattr(_SESSION_LOCAL, "browser_session", None)
+    if session is not None:
+        session.close()
+        del _SESSION_LOCAL.browser_session
+
+
 def setup_proxies():
     response = _requests_session().get(
         "https://www.sslproxies.org/",
@@ -52,10 +59,13 @@ def setup_proxies():
     return proxies
 
 
-PROXIES = setup_proxies()
+PROXIES = None
 
 
 def get_proxy():
+    global PROXIES
+    if PROXIES is None:
+        PROXIES = setup_proxies()
     if len(PROXIES) == 0:
         return None
     idx = np.random.randint(0, len(PROXIES))
@@ -72,14 +82,11 @@ def browser_get(url, **kwargs):
 
     Use this for sites that reject plain requests with bot-protection 403s.
     """
-    request_headers = kwargs.pop("headers", headers)
-    return _browser_session().get(
-        url,
-        headers=request_headers,
-        impersonate=kwargs.pop("impersonate", "chrome124"),
-        timeout=kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS),
-        **kwargs,
-    )
+    request_headers = kwargs.pop("headers", None)
+    session = curl_requests.Session() if kwargs.pop("fresh_session", False) else _browser_session()
+    if request_headers is not None:
+        kwargs["headers"] = request_headers
+    return session.get(url, impersonate=kwargs.pop("impersonate", "chrome124"), timeout=kwargs.pop("timeout", REQUEST_TIMEOUT_SECONDS), **kwargs)
 
 
 def fetch_html(url, retries=2, sleep_seconds=10, use_proxy=False, browser=False):
@@ -110,9 +117,12 @@ def get_htmls(urls, use_proxy=False, workers=MAX_WORKERS, browser=False):
     return html_responses
 
 
-def run_with_timeout(func, timeout_seconds, *args, **kwargs):
+def run_with_timeout(func, timeout_seconds, *args, cancel_event_kwarg=None, **kwargs):
     result = {}
     error = {}
+    cancel_event = threading.Event() if cancel_event_kwarg else None
+    if cancel_event_kwarg:
+        kwargs[cancel_event_kwarg] = cancel_event
 
     def target():
         try:
@@ -125,6 +135,8 @@ def run_with_timeout(func, timeout_seconds, *args, **kwargs):
     worker.join(timeout_seconds)
 
     if worker.is_alive():
+        if cancel_event is not None:
+            cancel_event.set()
         raise TimeoutError(f"Timed out after {timeout_seconds} seconds")
     if "value" in error:
         raise error["value"]

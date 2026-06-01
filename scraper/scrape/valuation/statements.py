@@ -19,7 +19,7 @@ def get_fiscal_quarter_number(quarter_end: pd.Timestamp, fiscal_year_end: pd.Tim
     return month_delta // 3 + 1
 
 
-def build_fiscal_bridge_context(info: dict, quarterly_income_statement: pd.DataFrame):
+def build_fiscal_bridge_context(info: dict, quarterly_income_statement: pd.DataFrame, fx_rate: float = 1.0):
     if quarterly_income_statement.empty:
         return None
 
@@ -42,8 +42,8 @@ def build_fiscal_bridge_context(info: dict, quarterly_income_statement: pd.DataF
     quarter_rows = [
         {
             "quarter_end": parse_timestamp(column),
-            "revenue": float(revenue_series.get(column, 0)),
-            "operating_income": float(operating_income_series.get(column, 0)),
+            "revenue": float(revenue_series.get(column, 0)) * fx_rate,
+            "operating_income": float(operating_income_series.get(column, 0)) * fx_rate,
         }
         for column in quarterly_income_statement.columns
     ]

@@ -6,10 +6,30 @@ from functools import lru_cache
 import pandas as pd
 
 from scrape.core.config import YAHOO_INFO_MAX_WORKERS
-from scrape.sources.sec_companyfacts import get_sec_ttm_financials
+from scrape.sources.sec_companyfacts import SecRateLimited, get_sec_ttm_financials
 from scrape.sources.yahooquery_adapter import YahooQueryTicker
 
 logger = logging.getLogger(__name__)
+
+YAHOO_FINANCIAL_KEYS = [
+    "Revenue TTM",
+    "Revenue Prev TTM",
+    "Net Income TTM",
+    "Net Income Prev TTM",
+    "EBIT TTM",
+    "EBIT Prev TTM",
+    "EBITDA TTM",
+    "EBITDA Prev TTM",
+    "Free Cash Flow TTM",
+]
+
+
+def with_ttm_defaults(financials):
+    result = {"Ticker": financials.get("Ticker")}
+    result.update(financials)
+    for key in YAHOO_FINANCIAL_KEYS:
+        result.setdefault(key, None)
+    return result
 
 
 @lru_cache(maxsize=10000)
@@ -54,11 +74,12 @@ def sum_statement_metric(statement: pd.DataFrame, metric_names: list[str], start
         return None
 
     for metric_name in metric_names:
-        if metric_name in statement.index:
-            values = pd.to_numeric(statement.loc[metric_name, columns], errors="coerce")
-            if values.isna().any():
-                return None
-            return float(values.sum())
+        if metric_name not in statement.index:
+            continue
+        values = pd.to_numeric(statement.loc[metric_name, columns], errors="coerce")
+        if values.isna().any():
+            return None
+        return float(values.sum())
 
     return None
 
@@ -84,91 +105,156 @@ def compute_ebitda(statement: pd.DataFrame, start=0, count=4):
     return ebit + depreciation
 
 
-def get_ttm_financials(ticker, yahoo_snapshot=None):
-    sec_financials = get_sec_ttm_financials(ticker)
+def _get_sec_ttm_financials_with_fallback(ticker):
+    try:
+        return get_sec_ttm_financials(ticker)
+    except SecRateLimited as e:
+        logger.warning("%s SEC TTM rate limited; using Yahoo latest TTM where available: %s", ticker, e)
+    except Exception as e:
+        logger.debug("%s SEC TTM unavailable; using Yahoo latest TTM where available: %s", ticker, e)
+    return {"Ticker": ticker}
+
+
+def prefetch_sec_ttm_financials(tickers, cancel_event=None):
+    started = time.monotonic()
+    sec_financials_by_ticker = {}
+    for i in range(0, len(tickers), YAHOO_INFO_MAX_WORKERS):
+        if cancel_event is not None and cancel_event.is_set():
+            logger.info("SEC TTM prefetch cancelled after %s tickers", len(sec_financials_by_ticker))
+            break
+        batch = tickers[i : i + YAHOO_INFO_MAX_WORKERS]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_INFO_MAX_WORKERS) as executor:
+            results = list(executor.map(_get_sec_ttm_financials_with_fallback, batch))
+        for result in results:
+            sec_financials_by_ticker[result["Ticker"]] = result
+
+        if i + YAHOO_INFO_MAX_WORKERS < len(tickers):
+            time.sleep(1)
+
+    logger.info("SEC TTM prefetch completed: %s tickers in %.1fs", len(sec_financials_by_ticker), time.monotonic() - started)
+    return sec_financials_by_ticker
+
+
+def get_ttm_financials(ticker, yahoo_snapshot=None, fx_rates=None, sec_financials=None):
+    sec_financials = sec_financials or _get_sec_ttm_financials_with_fallback(ticker)
 
     try:
         if yahoo_snapshot is not None:
             quarterly_income_stmt = yahoo_snapshot.quarterly_income_stmt
             quarterly_cashflow = yahoo_snapshot.quarterly_cashflow
+            ticker_info = yahoo_snapshot.info or {}
         else:
             yahoo_ticker = YahooQueryTicker(ticker)
             quarterly_income_stmt = normalize_quarterly_statement(yahoo_ticker.quarterly_income_stmt)
             quarterly_cashflow = normalize_quarterly_statement(yahoo_ticker.quarterly_cashflow)
+            ticker_info = get_yahoo_info(ticker) or {}
+
+        result = with_ttm_defaults(sec_financials)
         if quarterly_income_stmt.empty:
-            return None
+            logger.debug("%s Yahoo quarterly income statement unavailable", ticker)
+            return result
 
         most_recent_quarter = quarterly_income_stmt.columns[0]
-        result = {
-            "Ticker": ticker,
-            "Revenue TTM": sum_statement_metric(
+        yahoo_ebitda_ttm = compute_ebitda(quarterly_income_stmt)
+        if yahoo_ebitda_ttm is not None:
+            result["EBITDA TTM"] = yahoo_ebitda_ttm
+        if result.get("EBITDA Prev TTM") is None:
+            yahoo_ebitda_prev_ttm = compute_ebitda(quarterly_income_stmt, start=4, count=4)
+            if yahoo_ebitda_prev_ttm is not None:
+                result["EBITDA Prev TTM"] = yahoo_ebitda_prev_ttm
+
+        result.update(
+            {
+                "Free Cash Flow TTM": sum_statement_metric(quarterly_cashflow, ["Free Cash Flow"]),
+                "TTM Period End": pd.Timestamp(most_recent_quarter).strftime("%Y-%m-%d"),
+            }
+        )
+
+        yahoo_metrics = {
+            "Revenue": sum_statement_metric(quarterly_income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"]),
+            "Net Income": sum_statement_metric(
                 quarterly_income_stmt,
-                ["Total Revenue", "Operating Revenue", "Revenue"],
+                ["Net Income Common Stockholders", "Net Income Including Noncontrolling Interests", "Net Income"],
             ),
-            "Revenue Prev TTM": sum_statement_metric(
-                quarterly_income_stmt,
-                ["Total Revenue", "Operating Revenue", "Revenue"],
-                start=4,
-                count=4,
-            ),
-            "Net Income TTM": sum_statement_metric(
-                quarterly_income_stmt,
-                [
-                    "Net Income Common Stockholders",
-                    "Net Income Including Noncontrolling Interests",
-                    "Net Income",
-                ],
-            ),
-            "Net Income Prev TTM": sum_statement_metric(
-                quarterly_income_stmt,
-                [
-                    "Net Income Common Stockholders",
-                    "Net Income Including Noncontrolling Interests",
-                    "Net Income",
-                ],
-                start=4,
-                count=4,
-            ),
-            "EBITDA TTM": compute_ebitda(quarterly_income_stmt),
-            "EBITDA Prev TTM": compute_ebitda(quarterly_income_stmt, start=4, count=4),
-            "EBIT TTM": sum_statement_metric(
-                quarterly_income_stmt,
-                ["EBIT", "Operating Income"],
-            ),
-            "EBIT Prev TTM": sum_statement_metric(
-                quarterly_income_stmt,
-                ["EBIT", "Operating Income"],
-                start=4,
-                count=4,
-            ),
-            "Free Cash Flow TTM": sum_statement_metric(quarterly_cashflow, ["Free Cash Flow"]),
-            "TTM Period End": pd.Timestamp(most_recent_quarter).strftime("%Y-%m-%d"),
+            "EBIT": sum_statement_metric(quarterly_income_stmt, ["EBIT", "Operating Income"]),
         }
-        if sec_financials:
-            result.update({key: value for key, value in sec_financials.items() if value is not None})
+        yahoo_prev_metrics = {
+            "Revenue": sum_statement_metric(
+                quarterly_income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"], start=4, count=4
+            ),
+            "Net Income": sum_statement_metric(
+                quarterly_income_stmt,
+                ["Net Income Common Stockholders", "Net Income Including Noncontrolling Interests", "Net Income"],
+                start=4,
+                count=4,
+            ),
+            "EBIT": sum_statement_metric(quarterly_income_stmt, ["EBIT", "Operating Income"], start=4, count=4),
+        }
+        for prefix, value in yahoo_metrics.items():
+            if value is not None:
+                result[f"{prefix} TTM"] = value
+        for prefix, value in yahoo_prev_metrics.items():
+            key = f"{prefix} Prev TTM"
+            if result.get(key) is None and value is not None:
+                result[key] = value
+
+        financial_currency = ticker_info.get("financialCurrency")
+        if financial_currency and financial_currency != "USD":
+            fx_rate = (fx_rates or {}).get(financial_currency)
+            if fx_rate is None:
+                logger.warning("%s missing %s/USD FX rate; leaving financials in source currency", ticker, financial_currency)
+                result["Financial Currency"] = financial_currency
+                result["Source Financial Currency"] = financial_currency
+            else:
+                for key in YAHOO_FINANCIAL_KEYS:
+                    if result[key] is not None:
+                        result[key] *= fx_rate
+                result["Financial Currency"] = "USD"
+                result["Source Financial Currency"] = financial_currency
+                result["Financial USD FX Rate"] = fx_rate
+
         return result
     except Exception as e:
-        logger.debug("%s TTM skipped: %s", ticker, e)
-        return None
+        logger.warning("%s Yahoo latest TTM/cash flow skipped: %s", ticker, e)
+        return with_ttm_defaults(sec_financials)
 
 
-def compute_ttm_financials(tickers, yahoo_snapshots=None):
+def compute_ttm_financials(tickers, yahoo_snapshots=None, fx_rates=None, sec_financials_by_ticker=None):
     yahoo_snapshots = yahoo_snapshots or {}
+    sec_financials_by_ticker = sec_financials_by_ticker or prefetch_sec_ttm_financials(tickers)
     ttm_financials_by_ticker = {}
     for i in range(0, len(tickers), YAHOO_INFO_MAX_WORKERS):
         batch = tickers[i : i + YAHOO_INFO_MAX_WORKERS]
         with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_INFO_MAX_WORKERS) as executor:
-            results = list(executor.map(lambda ticker: get_ttm_financials(ticker, yahoo_snapshots.get(ticker)), batch))
+            results = list(
+                executor.map(
+                    lambda ticker: get_ttm_financials(
+                        ticker,
+                        yahoo_snapshots.get(ticker),
+                        fx_rates,
+                        sec_financials_by_ticker.get(ticker),
+                    ),
+                    batch,
+                )
+            )
         for result in results:
             if result:
                 ttm_financials_by_ticker[result["Ticker"]] = result
 
-        if i + YAHOO_INFO_MAX_WORKERS < len(tickers):
+        if i + YAHOO_INFO_MAX_WORKERS < len(tickers) and any(ticker not in yahoo_snapshots for ticker in batch):
             time.sleep(1)
 
     missing_count = len(tickers) - len(ttm_financials_by_ticker)
     if missing_count:
         logger.warning("TTM financials missing for %s out of %s tickers", missing_count, len(tickers))
+
+    unavailable_count = sum(
+        1
+        for ticker in tickers
+        if not any(ttm_financials_by_ticker.get(ticker, {}).get(key) is not None for key in YAHOO_FINANCIAL_KEYS)
+    )
+    if unavailable_count:
+        logger.warning("TTM financials unavailable from SEC/Yahoo for %s out of %s tickers", unavailable_count, len(tickers))
 
     ordered_financials = [ttm_financials_by_ticker[ticker] for ticker in tickers if ticker in ttm_financials_by_ticker]
     if not ordered_financials:

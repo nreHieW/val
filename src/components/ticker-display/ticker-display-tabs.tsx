@@ -66,7 +66,7 @@ export default function TickerDisplayTabs({
           }`}
           onClick={() => setTab("dcf")}
         >
-          DCF Model
+          DCF
           {activeTab === "dcf" && (
             <span className="absolute inset-x-0 -bottom-px h-[1.5px] rounded-full bg-foreground" />
           )}
@@ -82,7 +82,7 @@ export default function TickerDisplayTabs({
           }`}
           onClick={() => setTab("comparison")}
         >
-          Company Comparison
+          Compare
           {activeTab === "comparison" && (
             <span className="absolute inset-x-0 -bottom-px h-[1.5px] rounded-full bg-foreground" />
           )}

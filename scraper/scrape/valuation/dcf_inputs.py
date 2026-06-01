@@ -51,18 +51,46 @@ def _is_transient_yahoo_error(exc):
     return any(token in message for token in ("rate limit", "too many requests", "timeout"))
 
 
-def _with_yahoo_retries(label, func, *, financial_endpoint: bool = False):
+def _raise_if_cancelled(cancel_event):
+    if cancel_event is not None and cancel_event.is_set():
+        raise TimeoutError("Ticker processing cancelled")
+
+
+def _sleep_with_cancel(seconds, cancel_event):
+    if cancel_event is None:
+        time.sleep(seconds)
+    elif cancel_event.wait(seconds):
+        _raise_if_cancelled(cancel_event)
+
+
+def _future_result(future, cancel_event):
+    if cancel_event is None:
+        return future.result()
+    while True:
+        _raise_if_cancelled(cancel_event)
+        try:
+            return future.result(timeout=0.5)
+        except concurrent.futures.TimeoutError:
+            if future.done():
+                return future.result()
+
+
+def _with_yahoo_retries(label, func, *, financial_endpoint: bool = False, cancel_event=None):
     for attempt in range(YAHOO_INFO_RETRIES):
         try:
+            _raise_if_cancelled(cancel_event)
             if financial_endpoint:
-                _yahoo_financial_limiter.wait()
-            return func()
+                _yahoo_financial_limiter.wait(cancel_event)
+            _raise_if_cancelled(cancel_event)
+            result = func()
+            _raise_if_cancelled(cancel_event)
+            return result
         except Exception as exc:
             if attempt == YAHOO_INFO_RETRIES - 1 or not _is_transient_yahoo_error(exc):
                 raise
             sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1) + random.uniform(0, 0.75)
             logger.debug("%s Yahoo failure (%s); retrying in %.1fs", label, exc, sleep_seconds)
-            time.sleep(sleep_seconds)
+            _sleep_with_cancel(sleep_seconds, cancel_event)
 
 
 def _balance_sheet_scalar(df: pd.DataFrame, key: str, default: float = 0) -> float:
@@ -72,8 +100,9 @@ def _balance_sheet_scalar(df: pd.DataFrame, key: str, default: float = 0) -> flo
     return float(default) if pd.isna(val) else float(val)
 
 
-def _usd_fx_rate(currency: str | None, fx_rates: dict) -> float:
+def _usd_fx_rate(currency: str | None, fx_rates: dict, cancel_event=None) -> float:
     """Return the USD conversion rate for one unit of currency; fail if unavailable."""
+    _raise_if_cancelled(cancel_event)
     if not currency:
         return 1.0
 
@@ -91,7 +120,9 @@ def _usd_fx_rate(currency: str | None, fx_rates: dict) -> float:
             return float(resolved) / 100
 
     yahoo_pair = f"{currency}USD=X"
+    _raise_if_cancelled(cancel_event)
     history = YahooQueryTicker(yahoo_pair).history(period="5d")
+    _raise_if_cancelled(cancel_event)
     close = yahooquery_close_series(history)
     if not close.empty:
         return float(close.iloc[-1].item())
@@ -99,7 +130,7 @@ def _usd_fx_rate(currency: str | None, fx_rates: dict) -> float:
     raise ValueError(f"Missing USD FX rate for {currency} via {yahoo_pair}")
 
 
-def _income_statement_for_dcf(ticker: YahooQueryTicker) -> pd.DataFrame:
+def _income_statement_for_dcf(ticker: YahooQueryTicker, cancel_event=None) -> pd.DataFrame:
     """Return quarterly income statement only; fail loudly when Yahoo returns empty data."""
     symbol = ticker.ticker
     for attempt in range(YAHOO_INFO_RETRIES):
@@ -109,6 +140,7 @@ def _income_statement_for_dcf(ticker: YahooQueryTicker) -> pd.DataFrame:
                 symbol + " quarterly_income_stmt",
                 lambda: current_ticker.quarterly_income_stmt,
                 financial_endpoint=True,
+                cancel_event=cancel_event,
             )
         )
         if not quarterly.empty:
@@ -117,7 +149,7 @@ def _income_statement_for_dcf(ticker: YahooQueryTicker) -> pd.DataFrame:
         if attempt < YAHOO_INFO_RETRIES - 1:
             sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1) + random.uniform(0, 0.75)
             logger.debug("%s quarterly income statement empty; retrying in %.1fs", symbol, sleep_seconds)
-            time.sleep(sleep_seconds)
+            _sleep_with_cancel(sleep_seconds, cancel_event)
 
     raise MissingFinancialStatements(f"empty_quarterly_income_statement_after_retries:{symbol}")
 
@@ -237,16 +269,17 @@ def r_and_d_handler(income_statement: pd.DataFrame, industry: str):
     return expenses
 
 
-def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper, avg_metrics: dict, industry_mapper: StringMapper, mature_erp: float, risk_free_rate: float, fx_rates: dict, yahoo_snapshot=None, marketscreener_executor=None):
+def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper, avg_metrics: dict, industry_mapper: StringMapper, mature_erp: float, risk_free_rate: float, fx_rates: dict, yahoo_snapshot=None, marketscreener_executor=None, cancel_event=None):
     # Defaults
     average_maturity = 5
     marginal_tax_rate = 0.21
     value_of_options = 0
 
+    _raise_if_cancelled(cancel_event)
     ticker = yahoo_snapshot.yahoo_ticker if yahoo_snapshot else YahooQueryTicker(ticker)
     quarterly_income_statement = yahoo_snapshot.quarterly_income_stmt if yahoo_snapshot is not None else pd.DataFrame()
     if quarterly_income_statement.empty:
-        quarterly_income_statement = _income_statement_for_dcf(ticker)
+        quarterly_income_statement = _income_statement_for_dcf(ticker, cancel_event)
     ttm_columns = list(quarterly_income_statement.columns[:4])
     ttm_income_statement = quarterly_income_statement.loc[:, ttm_columns].T.fillna(0)
     last_balance_sheet = yahoo_snapshot.quarterly_balance_sheet if yahoo_snapshot is not None else pd.DataFrame()
@@ -255,12 +288,13 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
             ticker.ticker + " quarterly_balance_sheet",
             lambda: ticker.quarterly_balance_sheet,
             financial_endpoint=True,
+            cancel_event=cancel_event,
         )
     if last_balance_sheet.empty:
         raise MissingFinancialStatements(f"empty_quarterly_balance_sheet:{ticker.ticker}")
     else:
         last_balance_sheet = last_balance_sheet[last_balance_sheet.columns[:4]].T.ffill().bfill()
-    info = yahoo_snapshot.info if yahoo_snapshot is not None and yahoo_snapshot.info else _with_yahoo_retries(ticker.ticker + " info", lambda: ticker.get_info() or {})
+    info = yahoo_snapshot.info if yahoo_snapshot is not None and yahoo_snapshot.info else _with_yahoo_retries(ticker.ticker + " info", lambda: ticker.get_info() or {}, cancel_event=cancel_event)
 
     symbol = info.get("symbol") or ticker.ticker
     yahoo_profile = build_yahoo_profile(symbol, info)
@@ -271,7 +305,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
         yahoo_overview = None
     name = info.get("longName") or info.get("shortName") or symbol
     curr_currency = info.get("financialCurrency")
-    fx_rate = _usd_fx_rate(curr_currency, fx_rates)
+    fx_rate = _usd_fx_rate(curr_currency, fx_rates, cancel_event)
     if fx_rate != 1:
         last_balance_sheet = last_balance_sheet.apply(lambda x: x * fx_rate)
         ttm_income_statement["Operating Revenue"] = ttm_income_statement.get("Operating Revenue", 0) * fx_rate
@@ -325,29 +359,40 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     sector = info.get("sector") or industry
     avg_betas = avg_metrics["Unlevered Beta"]
     unlevered_beta, industry = get_industry_beta(industry, sector, industry_mapper, avg_betas)
-    marketscreener_url = get_marketscreener_url(symbol, info.get("shortName") or info.get("longName") or "")
+    _raise_if_cancelled(cancel_event)
+    marketscreener_url = get_marketscreener_url(symbol, info.get("shortName") or info.get("longName") or "", cancel_event)
+    _raise_if_cancelled(cancel_event)
 
     executor = marketscreener_executor or concurrent.futures.ThreadPoolExecutor(max_workers=2)
     should_shutdown_executor = marketscreener_executor is None
+    regional_revenues_future = None
+    forecast_defaults_future = None
     try:
-        regional_revenues_future = executor.submit(get_revenue_by_region, symbol, marketscreener_url)
-        forecast_defaults_future = executor.submit(get_revenue_forecasts, marketscreener_url)
+        regional_revenues_future = executor.submit(get_revenue_by_region, symbol, marketscreener_url, cancel_event)
+        forecast_defaults_future = executor.submit(get_revenue_forecasts, marketscreener_url, cancel_event)
 
         try:
-            regional_revenues = regional_revenues_future.result()
+            regional_revenues = _future_result(regional_revenues_future, cancel_event)
         except Exception as e:
+            _raise_if_cancelled(cancel_event)
             if not country:
                 raise ValueError(f"{symbol} regional revenue unavailable and company country missing") from e
             logger.debug("%s regional revenue unavailable; using country fallback: %s", symbol, e)
             regional_revenues = {country: revenues if revenues else 1}
         marketscreener_forecast_error = None
         try:
-            forecast_defaults = forecast_defaults_future.result()
+            forecast_defaults = _future_result(forecast_defaults_future, cancel_event)
         except Exception as e:
+            _raise_if_cancelled(cancel_event)
             marketscreener_forecast_error = f"{type(e).__name__}: {e}"
             logger.debug("%s revenue forecasts unavailable; skipping DCF DB update: %s", symbol, e)
             forecast_defaults = {}
     finally:
+        if cancel_event is not None and cancel_event.is_set():
+            if regional_revenues_future is not None:
+                regional_revenues_future.cancel()
+            if forecast_defaults_future is not None:
+                forecast_defaults_future.cancel()
         if should_shutdown_executor:
             executor.shutdown()
 
@@ -359,7 +404,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     target_pre_tax_operating_margin = avg_metrics["Pre-tax Operating Margin (Unadjusted)"].get(industry, 0)
 
     operating_margin_this_year = info.get("operatingMargins", operating_income_ttm / revenues if revenues else 0)
-    forecast_fx_rate = _usd_fx_rate(forecast_defaults.get("currency") or curr_currency, fx_rates)
+    forecast_fx_rate = _usd_fx_rate(forecast_defaults.get("currency") or curr_currency, fx_rates, cancel_event)
     consensus_revenues_usd = {
         year: value * forecast_fx_rate
         for year, value in forecast_defaults.get("consensus_revenues", {}).items()
@@ -446,6 +491,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
                 ticker.ticker + " income_stmt",
                 lambda: ticker.income_stmt,
                 financial_endpoint=True,
+                cancel_event=cancel_event,
             )
         r_and_d_expenses = r_and_d_handler(annual_income_stmt, industry)
     except Exception as e:

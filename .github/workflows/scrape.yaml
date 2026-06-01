@@ -4,6 +4,10 @@ on:
     - cron: '0 21 * * 1-5' # 9pm UTC Monday-Friday
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}
+  queue: max
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
@@ -18,10 +22,27 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
+      - name: Restore MarketScreener URL cache
+        uses: actions/cache/restore@v5
+        with:
+          path: scraper/marketscreener_links.json
+          key: marketscreener-links-${{ github.run_id }}
+          restore-keys: |
+            marketscreener-links-
+
       - name: Run the scraping script for dcf
+        timeout-minutes: 350
         env:
           MONGODB_USERNAME: ${{ secrets.MONGODB_USERNAME }}
           MONGODB_DB_PASSWORD: ${{ secrets.MONGODB_DB_PASSWORD }}
           MONGODB_DB_NAME: ${{ secrets.MONGODB_DB_NAME }}
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
           TQDM_DISABLE: "1"
         run: uv run main.py
+
+      - name: Save MarketScreener URL cache
+        if: always()
+        uses: actions/cache/save@v5
+        with:
+          path: scraper/marketscreener_links.json
+          key: marketscreener-links-${{ github.run_id }}

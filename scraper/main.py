@@ -13,7 +13,7 @@ from scrape.core.http_utils import run_with_timeout
 from scrape.core.json_util import CustomEncoder
 from scrape.core.mongo import get_mongo_client
 from scrape.core.tickers import get_all_tickers
-from scrape.sources.marketscreener import load_marketscreener_cache, save_marketscreener_cache
+from scrape.sources.marketscreener import load_marketscreener_cache, log_marketscreener_stats, save_marketscreener_cache
 from scrape.sources.yahoo_market_discovery import get_sector_industries, get_similar_companies
 from scrape.sources.yahoo_profiles import compute_ttm_financials, get_and_parse_yahoo
 from scrape.sources.yahoo_snapshot import get_yahoo_snapshots
@@ -48,6 +48,20 @@ def marketscreener_forecast_failed(record):
     )
 
 
+def _log_dcf_progress(batch, total_batches, completed_tickers, total_tickers, started):
+    elapsed = time.monotonic() - started
+    throughput = completed_tickers / elapsed if elapsed else 0
+    logger.info(
+        "Processing batch %s of %s: %s of %s tickers completed in %.1fs (%.2f tickers/s)",
+        batch,
+        total_batches,
+        completed_tickers,
+        total_tickers,
+        elapsed,
+        throughput,
+    )
+
+
 def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
     yahoo_snapshots = yahoo_snapshots or {}
     logger.info(f"Running DCF scrape for {len(tickers)} tickers")
@@ -69,6 +83,7 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
     yahoo_overviews = {}
     dcf_records = []
     marketscreener_forecast_failures = 0
+    processing_started = time.monotonic()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=DCF_MAX_WORKERS) as executor, concurrent.futures.ThreadPoolExecutor(max_workers=MARKETSCREENER_MAX_WORKERS) as marketscreener_executor:
         ticker_iter = iter(tickers)
@@ -101,7 +116,7 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
 
         total_batches = (len(tickers) + DCF_MAX_WORKERS - 1) // DCF_MAX_WORKERS
         if futures:
-            logger.info("Processing batch 1 of %s", total_batches)
+            _log_dcf_progress(1, total_batches, 0, len(tickers), processing_started)
 
         completed_tickers = 0
         next_batch_to_log = 2
@@ -130,7 +145,9 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
                     continue
 
             while next_batch_to_log <= total_batches and completed_tickers >= (next_batch_to_log - 1) * DCF_MAX_WORKERS:
-                logger.info("Processing batch %s of %s", next_batch_to_log, total_batches)
+                _log_dcf_progress(next_batch_to_log, total_batches, completed_tickers, len(tickers), processing_started)
+                if next_batch_to_log % 25 == 0:
+                    log_marketscreener_stats()
                 next_batch_to_log += 1
 
     num_errors = sum(failure_counts.values())
@@ -247,6 +264,7 @@ def main():
         _log_timing("Comps scrape", run_comps_scrape, tickers, client, yahoo_profiles, yahoo_snapshots)
         _log_timing("Market discovery scrape", run_market_discovery_scrape, tickers, client, yahoo_snapshots)
     finally:
+        log_marketscreener_stats()
         save_marketscreener_cache()
         logger.info("Full scrape completed in %.1fs", time.monotonic() - started)
 
@@ -274,6 +292,7 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
             fx_rates,
             yahoo_snapshot,
             marketscreener_executor,
+            cancel_event_kwarg="cancel_event",
         )
         dcf_inputs = json.dumps(dcf_result["dcf_inputs"], cls=CustomEncoder)
         dcf_inputs = json.loads(dcf_inputs)

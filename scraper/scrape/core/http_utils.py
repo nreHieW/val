@@ -30,6 +30,13 @@ def _browser_session():
     return session
 
 
+def reset_browser_session():
+    session = getattr(_SESSION_LOCAL, "browser_session", None)
+    if session is not None:
+        session.close()
+        del _SESSION_LOCAL.browser_session
+
+
 def setup_proxies():
     response = _requests_session().get(
         "https://www.sslproxies.org/",
@@ -114,9 +121,12 @@ def get_htmls(urls, use_proxy=False, workers=MAX_WORKERS, browser=False):
     return html_responses
 
 
-def run_with_timeout(func, timeout_seconds, *args, **kwargs):
+def run_with_timeout(func, timeout_seconds, *args, cancel_event_kwarg=None, **kwargs):
     result = {}
     error = {}
+    cancel_event = threading.Event() if cancel_event_kwarg else None
+    if cancel_event_kwarg:
+        kwargs[cancel_event_kwarg] = cancel_event
 
     def target():
         try:
@@ -129,6 +139,8 @@ def run_with_timeout(func, timeout_seconds, *args, **kwargs):
     worker.join(timeout_seconds)
 
     if worker.is_alive():
+        if cancel_event is not None:
+            cancel_event.set()
         raise TimeoutError(f"Timed out after {timeout_seconds} seconds")
     if "value" in error:
         raise error["value"]

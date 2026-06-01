@@ -19,7 +19,7 @@ from scrape.core.config import (
     MARKETSCREENER_RETRIES,
     MARKETSCREENER_RETRY_SLEEP_SECONDS,
 )
-from scrape.core.http_utils import browser_get
+from scrape.core.http_utils import browser_get, reset_browser_session
 from scrape.core.rate_limit import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -27,9 +27,39 @@ _MARKETSCREENER_CACHE_FILE = "marketscreener_links.json"
 _MARKETSCREENER_CACHE = {}
 _MARKETSCREENER_CACHE_LOADED = False
 _MARKETSCREENER_CACHE_DIRTY = False
+_MARKETSCREENER_CACHE_UPDATES_SINCE_SAVE = 0
+_MARKETSCREENER_CACHE_SAVE_INTERVAL = 25
 _MARKETSCREENER_IMPERSONATE = ("chrome124", "chrome120", "safari184")
 _MARKETSCREENER_SEMAPHORE = threading.BoundedSemaphore(MARKETSCREENER_MAX_WORKERS)
 _MARKETSCREENER_LIMITER = RateLimiter(MARKETSCREENER_MIN_INTERVAL_SECONDS, MARKETSCREENER_JITTER_SECONDS)
+_MARKETSCREENER_STATS = {
+    "cache_hits": 0,
+    "cache_misses": 0,
+    "requests": 0,
+    "retries": 0,
+    "limiter_wait_seconds": 0.0,
+    "http_seconds": 0.0,
+}
+_MARKETSCREENER_STATS_LOCK = threading.Lock()
+
+
+def _increment_stat(name, amount=1):
+    with _MARKETSCREENER_STATS_LOCK:
+        _MARKETSCREENER_STATS[name] += amount
+
+
+def log_marketscreener_stats():
+    with _MARKETSCREENER_STATS_LOCK:
+        stats = _MARKETSCREENER_STATS.copy()
+    logger.info(
+        "MarketScreener stats: %s cache hits, %s cache misses, %s requests, %s retries, %.1fs limiter wait, %.1fs HTTP",
+        stats["cache_hits"],
+        stats["cache_misses"],
+        stats["requests"],
+        stats["retries"],
+        stats["limiter_wait_seconds"],
+        stats["http_seconds"],
+    )
 
 
 def load_marketscreener_cache():
@@ -41,21 +71,41 @@ def load_marketscreener_cache():
             with open(_MARKETSCREENER_CACHE_FILE, "r") as f:
                 _MARKETSCREENER_CACHE = json.load(f)
         _MARKETSCREENER_CACHE_LOADED = True
+        logger.info("MarketScreener URL cache loaded: %s links", len(_MARKETSCREENER_CACHE))
+
+
+def _save_marketscreener_cache_locked():
+    global _MARKETSCREENER_CACHE_DIRTY, _MARKETSCREENER_CACHE_UPDATES_SINCE_SAVE
+    if not _MARKETSCREENER_CACHE_DIRTY:
+        return
+    temp_file = _MARKETSCREENER_CACHE_FILE + ".tmp"
+    with open(temp_file, "w") as f:
+        json.dump(_MARKETSCREENER_CACHE, f)
+    os.replace(temp_file, _MARKETSCREENER_CACHE_FILE)
+    _MARKETSCREENER_CACHE_DIRTY = False
+    _MARKETSCREENER_CACHE_UPDATES_SINCE_SAVE = 0
 
 
 def save_marketscreener_cache():
-    global _MARKETSCREENER_CACHE_DIRTY
     with JSON_LOCK:
-        if not _MARKETSCREENER_CACHE_DIRTY:
-            return
-        with open(_MARKETSCREENER_CACHE_FILE, "w") as f:
-            json.dump(_MARKETSCREENER_CACHE, f)
-        _MARKETSCREENER_CACHE_DIRTY = False
+        _save_marketscreener_cache_locked()
 
 
-def _marketscreener_search(ticker, query):
+def _raise_if_cancelled(cancel_event):
+    if cancel_event is not None and cancel_event.is_set():
+        raise TimeoutError("MarketScreener request cancelled")
+
+
+def _sleep_with_cancel(seconds, cancel_event):
+    if cancel_event is None:
+        time.sleep(seconds)
+    elif cancel_event.wait(seconds):
+        _raise_if_cancelled(cancel_event)
+
+
+def _marketscreener_search(ticker, query, cancel_event=None):
     search_url = "https://www.marketscreener.com/search/?q=" + "+".join(query.split())
-    page = _marketscreener_get(search_url)
+    page = _marketscreener_get(search_url, cancel_event)
     soup = BeautifulSoup(page.content, "lxml")
     for row in soup.find_all("tr"):
         ticker_tag = row.find("td", {"class": "txt-bold"})
@@ -67,13 +117,15 @@ def _marketscreener_search(ticker, query):
     return None
 
 
-def get_marketscreener_url(ticker, name: str = ""):
-    global _MARKETSCREENER_CACHE_DIRTY
+def get_marketscreener_url(ticker, name: str = "", cancel_event=None):
+    global _MARKETSCREENER_CACHE_DIRTY, _MARKETSCREENER_CACHE_UPDATES_SINCE_SAVE
     load_marketscreener_cache()
     with JSON_LOCK:
         cached_link = _MARKETSCREENER_CACHE.get(ticker)
     if cached_link:
+        _increment_stat("cache_hits")
         return cached_link
+    _increment_stat("cache_misses")
 
     queries = [ticker]
     if name:
@@ -81,7 +133,8 @@ def get_marketscreener_url(ticker, name: str = ""):
 
     found_link = None
     for query in queries:
-        found_link = _marketscreener_search(ticker, query)
+        _raise_if_cancelled(cancel_event)
+        found_link = _marketscreener_search(ticker, query, cancel_event)
         if found_link:
             break
 
@@ -91,21 +144,36 @@ def get_marketscreener_url(ticker, name: str = ""):
         with JSON_LOCK:
             _MARKETSCREENER_CACHE[ticker] = found_link
             _MARKETSCREENER_CACHE_DIRTY = True
+            _MARKETSCREENER_CACHE_UPDATES_SINCE_SAVE += 1
+            if _MARKETSCREENER_CACHE_UPDATES_SINCE_SAVE >= _MARKETSCREENER_CACHE_SAVE_INTERVAL:
+                _save_marketscreener_cache_locked()
 
     return found_link
 
 
-def _marketscreener_get(url):
+def _marketscreener_get(url, cancel_event=None):
     last_error = None
     for attempt in range(MARKETSCREENER_RETRIES):
         try:
-            _MARKETSCREENER_LIMITER.wait()
+            _raise_if_cancelled(cancel_event)
+            limiter_started = time.monotonic()
+            try:
+                _MARKETSCREENER_LIMITER.wait(cancel_event)
+            finally:
+                _increment_stat("limiter_wait_seconds", time.monotonic() - limiter_started)
+            _raise_if_cancelled(cancel_event)
             with _MARKETSCREENER_SEMAPHORE:
-                response = browser_get(
-                    url,
-                    impersonate=_MARKETSCREENER_IMPERSONATE[attempt % len(_MARKETSCREENER_IMPERSONATE)],
-                    fresh_session=True,
-                )
+                _raise_if_cancelled(cancel_event)
+                _increment_stat("requests")
+                http_started = time.monotonic()
+                try:
+                    response = browser_get(
+                        url,
+                        impersonate=_MARKETSCREENER_IMPERSONATE[attempt % len(_MARKETSCREENER_IMPERSONATE)],
+                    )
+                finally:
+                    _increment_stat("http_seconds", time.monotonic() - http_started)
+            _raise_if_cancelled(cancel_event)
             response.raise_for_status()
             text = response.text.lower()
             if response.status_code in {403, 429, 503} or any(
@@ -116,8 +184,11 @@ def _marketscreener_get(url):
             return response
         except Exception as e:
             last_error = e
+            _raise_if_cancelled(cancel_event)
             if attempt < MARKETSCREENER_RETRIES - 1:
-                time.sleep(MARKETSCREENER_RETRY_SLEEP_SECONDS * (attempt + 1))
+                _increment_stat("retries")
+                reset_browser_session()
+                _sleep_with_cancel(MARKETSCREENER_RETRY_SLEEP_SECONDS * (attempt + 1), cancel_event)
     raise last_error
 
 
@@ -146,11 +217,11 @@ def _clean_segment_label(value):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def get_revenue_by_region(ticker, url):
+def get_revenue_by_region(ticker, url, cancel_event=None):
     if not url:
         raise ValueError(f"No MarketScreener URL for {ticker}")
 
-    page = _marketscreener_get(url.rstrip("/") + "/finances-segments/")
+    page = _marketscreener_get(url.rstrip("/") + "/finances-segments/", cancel_event)
     soup = BeautifulSoup(page.content, "lxml")
 
     for header in soup.find_all("div", {"class": "card-header"}):
@@ -208,8 +279,8 @@ def get_revenue_by_region(ticker, url):
     raise ValueError(f"No geographical revenue segments for {ticker}")
 
 
-def get_revenue_forecasts(url):
-    page = _marketscreener_get(url + "finances/")
+def get_revenue_forecasts(url, cancel_event=None):
+    page = _marketscreener_get(url + "finances/", cancel_event)
     soup = BeautifulSoup(page.content, features="lxml")
     for div in soup.find_all("div", {"class": "card card--collapsible mb-15"}):
         header = div.find("div", {"class": "card-header"})

@@ -168,18 +168,54 @@ class PerformanceOptimizationTests(unittest.TestCase):
         self.assertIsNotNone(card)
         self.assertIsNotNone(table)
 
-    def test_marketscreener_historical_only_page_is_not_used_as_forecast(self):
+    def test_marketscreener_historical_only_redirect_is_retried_and_not_used_as_forecast(self):
         url = "https://example.com/quote/A/"
         response = _HtmlResponse(
             "<html></html>",
             "https://example.com/quote/A/finances-income-statement/",
         )
-        with patch.object(marketscreener, "_marketscreener_get", return_value=response):
+        with (
+            patch.object(marketscreener._MARKETSCREENER_LIMITER, "wait"),
+            patch.object(marketscreener, "browser_get", return_value=response) as browser_get,
+            patch.object(marketscreener, "reset_browser_session") as reset_browser_session,
+            patch.object(marketscreener.time, "sleep"),
+        ):
             with self.assertRaisesRegex(
                 marketscreener.MarketScreenerForecastUnavailable,
-                "No forecast page available",
+                "redirected forecast request",
             ):
                 marketscreener.get_revenue_forecasts(url)
+
+        self.assertEqual(browser_get.call_count, marketscreener.MARKETSCREENER_RETRIES)
+        self.assertEqual(reset_browser_session.call_count, marketscreener.MARKETSCREENER_RETRIES - 1)
+
+    def test_marketscreener_forecast_redirect_can_recover_after_session_reset(self):
+        url = "https://example.com/quote/A/finances/"
+        redirected = _HtmlResponse("<html></html>", "https://example.com/quote/A/")
+        valid_html = """
+            <div class="card">
+                <div class="card-header">Projected Income Statement</div>
+                <table><tr><th>Metric</th><th>2025</th></tr></table>
+            </div>
+        """
+        with (
+            patch.object(marketscreener._MARKETSCREENER_LIMITER, "wait"),
+            patch.object(
+                marketscreener,
+                "browser_get",
+                side_effect=[redirected, _HtmlResponse(valid_html, url)],
+            ) as browser_get,
+            patch.object(marketscreener, "reset_browser_session") as reset_browser_session,
+            patch.object(marketscreener.time, "sleep"),
+        ):
+            response = marketscreener._marketscreener_get(
+                url,
+                validator=marketscreener._validate_revenue_forecast_page,
+            )
+
+        self.assertEqual(response.text, valid_html)
+        self.assertEqual(browser_get.call_count, 2)
+        reset_browser_session.assert_called_once_with()
 
     def test_marketscreener_restored_url_cache_avoids_search_request(self):
         with (
@@ -220,6 +256,17 @@ class PerformanceOptimizationTests(unittest.TestCase):
             self.assertIsNone(http_utils.get_proxy())
 
         setup_proxies.assert_called_once_with()
+
+    def test_browser_get_uses_impersonated_browser_headers_by_default(self):
+        session = Mock()
+        with patch.object(http_utils, "_browser_session", return_value=session):
+            http_utils.browser_get("https://example.com")
+
+        session.get.assert_called_once_with(
+            "https://example.com",
+            impersonate="chrome124",
+            timeout=http_utils.REQUEST_TIMEOUT_SECONDS,
+        )
 
     def test_yahoo_snapshots_are_chunked_and_paced(self):
         with (

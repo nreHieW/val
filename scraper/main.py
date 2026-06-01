@@ -48,8 +48,10 @@ def marketscreener_forecast_error(record):
 
 
 def _forecast_error_category(error):
+    if "MarketScreener redirected forecast request" in error and "/finances-income-statement/" in error:
+        return "MarketScreener redirected forecast request to historical income statement"
     for marker in (
-        "No forecast page available",
+        "MarketScreener redirected forecast request",
         "MarketScreener forecast page missing income statement section",
         "MarketScreener anti-bot page returned",
     ):

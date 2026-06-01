@@ -303,7 +303,9 @@ def _is_forecast_page(url):
 
 def _validate_revenue_forecast_page(response):
     if not _is_forecast_page(response.url):
-        return
+        raise MarketScreenerForecastUnavailable(
+            f"MarketScreener redirected forecast request to {str(response.url)!r}"
+        )
     soup = BeautifulSoup(response.content, features="lxml")
     _, table = _forecast_income_statement_section(soup)
     if table is None:
@@ -313,8 +315,6 @@ def _validate_revenue_forecast_page(response):
 def get_revenue_forecasts(url, cancel_event=None):
     request_url = url.rstrip("/") + "/finances/"
     page = _marketscreener_get(request_url, cancel_event, validator=_validate_revenue_forecast_page)
-    if not _is_forecast_page(page.url):
-        raise MarketScreenerForecastUnavailable(f"No forecast page available for MarketScreener URL {url!r}")
 
     soup = BeautifulSoup(page.content, features="lxml")
     card, table = _forecast_income_statement_section(soup)

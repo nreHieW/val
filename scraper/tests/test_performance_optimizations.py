@@ -6,14 +6,14 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import numpy as np
 
 import main
 from scrape.core import http_utils
 from scrape.core.rate_limit import RateLimiter
-from scrape.sources import marketscreener
+from scrape.sources import marketscreener, yahoo_snapshot
 from scrape.valuation import dcf_inputs, string_mapper
 
 
@@ -138,6 +138,44 @@ class PerformanceOptimizationTests(unittest.TestCase):
             self.assertIsNone(http_utils.get_proxy())
 
         setup_proxies.assert_called_once_with()
+
+    def test_yahoo_snapshots_are_chunked_and_paced(self):
+        with (
+            patch.object(yahoo_snapshot, "YAHOOQUERY_BATCH_SIZE", 2),
+            patch.object(yahoo_snapshot, "YAHOOQUERY_BATCH_SLEEP_SECONDS", 1),
+            patch.object(
+                yahoo_snapshot,
+                "_get_yahoo_snapshot_batch",
+                side_effect=lambda batch: {ticker: ticker for ticker in batch},
+            ) as get_batch,
+            patch.object(yahoo_snapshot.time, "sleep") as sleep,
+        ):
+            snapshots = yahoo_snapshot.get_yahoo_snapshots(["A", "B", "C", "D", "E"])
+
+        self.assertEqual(snapshots, {"A": "A", "B": "B", "C": "C", "D": "D", "E": "E"})
+        self.assertEqual(get_batch.call_args_list, [call(["A", "B"]), call(["C", "D"]), call(["E"])])
+        self.assertEqual(sleep.call_args_list, [call(1), call(1)])
+
+    def test_yahoo_snapshot_batch_limits_internal_workers(self):
+        with (
+            patch.object(yahoo_snapshot, "YAHOOQUERY_MAX_WORKERS", 4),
+            patch.object(yahoo_snapshot, "Ticker", side_effect=RuntimeError("stop")) as ticker,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "stop"):
+                yahoo_snapshot._get_yahoo_snapshot_batch(["BRK.B"])
+
+        ticker.assert_called_once_with(["BRK-B"], asynchronous=True, max_workers=4)
+
+    def test_yahoo_snapshot_partial_batch_is_reported(self):
+        with (
+            patch.object(yahoo_snapshot, "YAHOOQUERY_BATCH_SIZE", 2),
+            patch.object(yahoo_snapshot, "_get_yahoo_snapshot_batch", return_value={"A": "A"}),
+        ):
+            with self.assertLogs(yahoo_snapshot.logger, level="WARNING") as logs:
+                yahoo_snapshot.get_yahoo_snapshots(["A", "B"])
+
+        self.assertIn("1 of 2 snapshots collected", logs.output[0])
+        self.assertIn("Yahoo snapshots missing for 1 out of 2 tickers", logs.output[1])
 
     def test_timeout_signals_cooperative_cancellation(self):
         cancelled = threading.Event()

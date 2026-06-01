@@ -6,6 +6,7 @@ import re
 import threading
 import time
 from io import StringIO
+from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
@@ -41,6 +42,10 @@ _MARKETSCREENER_STATS = {
     "http_seconds": 0.0,
 }
 _MARKETSCREENER_STATS_LOCK = threading.Lock()
+
+
+class MarketScreenerForecastUnavailable(ValueError):
+    """Raised when MarketScreener exposes historical financials but no forecast page."""
 
 
 def _increment_stat(name, amount=1):
@@ -151,7 +156,7 @@ def get_marketscreener_url(ticker, name: str = "", cancel_event=None):
     return found_link
 
 
-def _marketscreener_get(url, cancel_event=None):
+def _marketscreener_get(url, cancel_event=None, validator=None):
     last_error = None
     for attempt in range(MARKETSCREENER_RETRIES):
         try:
@@ -181,6 +186,8 @@ def _marketscreener_get(url, cancel_event=None):
                 for marker in ("cf-chl", "g-recaptcha-response", "access denied", "too many requests")
             ):
                 raise RuntimeError(f"MarketScreener anti-bot page returned for {url}")
+            if validator is not None:
+                validator(response)
             return response
         except Exception as e:
             last_error = e
@@ -227,7 +234,7 @@ def get_revenue_by_region(ticker, url, cancel_event=None):
     for header in soup.find_all("div", {"class": "card-header"}):
         if "geographical revenue distribution history" not in header.get_text(" ", strip=True).lower():
             continue
-        card = header.find_parent("div", class_=lambda classes: classes and "card" in classes)
+        card = header.find_parent(class_=lambda classes: classes and "card" in classes)
         chart = card.find(attrs={"data-fct-name": "drawFinancialSegmentCAChart"})
         revenues = {}
         for segment_key, segment in json.loads(chart["data-fct-attr"]).get("data", {}).items():
@@ -279,79 +286,103 @@ def get_revenue_by_region(ticker, url, cancel_event=None):
     raise ValueError(f"No geographical revenue segments for {ticker}")
 
 
-def get_revenue_forecasts(url, cancel_event=None):
-    page = _marketscreener_get(url + "finances/", cancel_event)
-    soup = BeautifulSoup(page.content, features="lxml")
-    for div in soup.find_all("div", {"class": "card card--collapsible mb-15"}):
-        header = div.find("div", {"class": "card-header"})
-        if not header:
+def _forecast_income_statement_section(soup):
+    for header in soup.select(".card-header"):
+        if "income statement" not in header.get_text(" ", strip=True).lower():
             continue
-        header_text = header.text.lower()
-        if "income statement" in header_text:
-            income_statement = pd.read_html(StringIO(str(div.find("table"))))[0]
-            income_statement = income_statement.dropna(axis=1, how="all")
-            income_statement.iloc[:, 0] = income_statement.iloc[:, 0].str.replace(r"\d", "", regex=True)
-            income_statement.set_index(income_statement.columns[0], inplace=True)
-            income_statement.index = income_statement.index.str.strip()
+        card = header.find_parent("div", class_=lambda classes: classes and "card" in classes)
+        table = card.find("table") if card else None
+        if table is not None:
+            return card, table
+    return None, None
 
-            superscript = div.find("sup")
-            currency = ""
-            unit = ""
-            if superscript and superscript.attrs.get("title"):
-                title = superscript.attrs["title"].strip().split()
-                currency = title[0] if len(title) > 0 else ""
-                unit = title[-1] if len(title) > 1 else ""
 
-            unit_multiplier = {
-                "trillion": 1e12,
-                "billion": 1e9,
-                "million": 1e6,
-                "thousand": 1e3,
-            }.get(unit.lower(), 1)
+def _is_forecast_page(url):
+    return urlparse(str(url)).path.rstrip("/").endswith("/finances")
 
-            indiv = income_statement.loc[["Net sales"]].apply(
-                lambda column: pd.to_numeric(column.astype(str).str.replace(",", ""), errors="coerce")
+
+def _validate_revenue_forecast_page(response):
+    if not _is_forecast_page(response.url):
+        return
+    soup = BeautifulSoup(response.content, features="lxml")
+    _, table = _forecast_income_statement_section(soup)
+    if table is None:
+        raise RuntimeError("MarketScreener forecast page missing income statement section")
+
+
+def get_revenue_forecasts(url, cancel_event=None):
+    request_url = url.rstrip("/") + "/finances/"
+    page = _marketscreener_get(request_url, cancel_event, validator=_validate_revenue_forecast_page)
+    if not _is_forecast_page(page.url):
+        raise MarketScreenerForecastUnavailable(f"No forecast page available for MarketScreener URL {url!r}")
+
+    soup = BeautifulSoup(page.content, features="lxml")
+    card, table = _forecast_income_statement_section(soup)
+    if table is not None:
+        income_statement = pd.read_html(StringIO(str(table)))[0]
+        income_statement = income_statement.dropna(axis=1, how="all")
+        income_statement.iloc[:, 0] = income_statement.iloc[:, 0].str.replace(r"\d", "", regex=True)
+        income_statement.set_index(income_statement.columns[0], inplace=True)
+        income_statement.index = income_statement.index.str.strip()
+
+        superscript = card.find("sup")
+        currency = ""
+        unit = ""
+        if superscript and superscript.attrs.get("title"):
+            title = superscript.attrs["title"].strip().split()
+            currency = title[0] if len(title) > 0 else ""
+            unit = title[-1] if len(title) > 1 else ""
+
+        unit_multiplier = {
+            "trillion": 1e12,
+            "billion": 1e9,
+            "million": 1e6,
+            "thousand": 1e3,
+        }.get(unit.lower(), 1)
+
+        indiv = income_statement.loc[["Net sales"]].apply(
+            lambda column: pd.to_numeric(column.astype(str).str.replace(",", ""), errors="coerce")
+        )
+        curr_year = datetime.datetime.now().year - 1
+        if str(curr_year) not in indiv.columns:
+            raise ValueError(f"Income statement missing required net sales year column {str(curr_year)!r}")
+
+        curr_year_index = indiv.columns.get_loc(str(curr_year))
+        indiv = indiv.iloc[:, curr_year_index:].astype(float)
+        consensus_revenues = {
+            str(column): float(value) * unit_multiplier
+            for column, value in indiv.iloc[0].items()
+            if pd.notna(value)
+        }
+        growth = indiv.pct_change(axis=1)
+        revenue_growth_rate_next_year = float(growth.values[0][1]) if growth.shape[1] > 1 and pd.notna(growth.values[0][1]) else 0
+        raw_compounded_growth_rates = [value for value in growth.values[0][1:] if pd.notna(value)]
+        compounded_annual_revenue_growth_rate = float(np.mean(raw_compounded_growth_rates)) if raw_compounded_growth_rates else 0
+        ebit = pd.Series(dtype=float)
+        if "EBIT" in income_statement.index:
+            ebit = income_statement.loc["EBIT", indiv.columns].apply(
+                lambda x: pd.to_numeric(str(x).replace(",", ""), errors="coerce")
             )
-            curr_year = datetime.datetime.now().year - 1
-            if str(curr_year) not in indiv.columns:
-                raise ValueError(f"Income statement missing required net sales year column {str(curr_year)!r}")
+        consensus_ebit = {
+            str(column): float(value) * unit_multiplier
+            for column, value in ebit.items()
+            if pd.notna(value)
+        }
 
-            curr_year_index = indiv.columns.get_loc(str(curr_year))
-            indiv = indiv.iloc[:, curr_year_index:].astype(float)
-            consensus_revenues = {
-                str(column): float(value) * unit_multiplier
-                for column, value in indiv.iloc[0].items()
-                if pd.notna(value)
-            }
-            growth = indiv.pct_change(axis=1)
-            revenue_growth_rate_next_year = float(growth.values[0][1]) if growth.shape[1] > 1 and pd.notna(growth.values[0][1]) else 0
-            raw_compounded_growth_rates = [value for value in growth.values[0][1:] if pd.notna(value)]
-            compounded_annual_revenue_growth_rate = float(np.mean(raw_compounded_growth_rates)) if raw_compounded_growth_rates else 0
-            ebit = pd.Series(dtype=float)
-            if "EBIT" in income_statement.index:
-                ebit = income_statement.loc["EBIT", indiv.columns].apply(
-                    lambda x: pd.to_numeric(str(x).replace(",", ""), errors="coerce")
-                )
-            consensus_ebit = {
-                str(column): float(value) * unit_multiplier
-                for column, value in ebit.items()
-                if pd.notna(value)
-            }
+        op_margins = ebit / indiv if not ebit.empty else pd.DataFrame()
+        op_margin_next_year = (
+            op_margins[[str(curr_year + 2)]].iloc[0].values[0]
+            if not op_margins.empty and str(curr_year + 2) in op_margins.columns
+            else 0
+        )  # MarketScreener has some inconsistencies of EBIT values versus yahoo finance
+        return {
+            "revenue_growth_rate_next_year": revenue_growth_rate_next_year,
+            "compounded_annual_revenue_growth_rate": compounded_annual_revenue_growth_rate,
+            "operating_margin_next_year": 0 if pd.isna(op_margin_next_year) else float(op_margin_next_year),
+            "consensus_revenues": consensus_revenues,
+            "consensus_ebit": consensus_ebit,
+            "currency": currency,
+            "unit": unit,
+        }
 
-            op_margins = ebit / indiv if not ebit.empty else pd.DataFrame()
-            op_margin_next_year = (
-                op_margins[[str(curr_year + 2)]].iloc[0].values[0]
-                if not op_margins.empty and str(curr_year + 2) in op_margins.columns
-                else 0
-            )  # MarketScreener has some inconsistencies of EBIT values versus yahoo finance
-            return {
-                "revenue_growth_rate_next_year": revenue_growth_rate_next_year,
-                "compounded_annual_revenue_growth_rate": compounded_annual_revenue_growth_rate,
-                "operating_margin_next_year": 0 if pd.isna(op_margin_next_year) else float(op_margin_next_year),
-                "consensus_revenues": consensus_revenues,
-                "consensus_ebit": consensus_ebit,
-                "currency": currency,
-                "unit": unit,
-            }
-
-    raise ValueError(f"No income statement section found for MarketScreener URL {url!r}")
+    raise RuntimeError(f"MarketScreener forecast page missing income statement section for URL {url!r}")

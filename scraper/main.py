@@ -4,6 +4,7 @@ import logging
 import os
 import time
 import traceback
+from collections import Counter
 
 import pandas as pd
 from pymongo import UpdateOne
@@ -40,12 +41,21 @@ def _log_timing(label, fn, *args, **kwargs):
         logger.info("%s completed in %.1fs", label, time.monotonic() - started)
 
 
-def marketscreener_forecast_failed(record):
-    return bool(
-        ((record.get("extras") or {}).get("forecast_context") or {}).get(
-            "marketscreener_forecast_error"
-        )
+def marketscreener_forecast_error(record):
+    return ((record.get("extras") or {}).get("forecast_context") or {}).get(
+        "marketscreener_forecast_error"
     )
+
+
+def _forecast_error_category(error):
+    for marker in (
+        "No forecast page available",
+        "MarketScreener forecast page missing income statement section",
+        "MarketScreener anti-bot page returned",
+    ):
+        if marker in error:
+            return marker
+    return error.split(":", 1)[0]
 
 
 def _log_dcf_progress(batch, total_batches, completed_tickers, total_tickers, started):
@@ -97,7 +107,7 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
     yahoo_profiles = {}
     yahoo_overviews = {}
     dcf_records = []
-    marketscreener_forecast_failures = 0
+    marketscreener_forecast_failures = Counter()
     processing_started = time.monotonic()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=DCF_MAX_WORKERS) as executor, concurrent.futures.ThreadPoolExecutor(max_workers=MARKETSCREENER_MAX_WORKERS) as marketscreener_executor:
@@ -144,8 +154,9 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
                 completed_tickers += 1
                 submit_next_ticker()
                 if dcf_inputs:
-                    if marketscreener_forecast_failed(dcf_inputs):
-                        marketscreener_forecast_failures += 1
+                    forecast_error = marketscreener_forecast_error(dcf_inputs)
+                    if forecast_error:
+                        marketscreener_forecast_failures[_forecast_error_category(forecast_error)] += 1
                     else:
                         dcf_records.append((ticker, dcf_inputs))
                 if yahoo_profile:
@@ -173,8 +184,9 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
         logger.warning("DCF failure summary: %s", ", ".join(f"{reason}: {count}" for reason, count in sorted(failure_counts.items())))
     if marketscreener_forecast_failures:
         logger.warning(
-            "MarketScreener forecast failures: %s tickers skipped from DCF DB update",
-            marketscreener_forecast_failures,
+            "MarketScreener forecast failures: %s tickers skipped from DCF DB update (%s)",
+            sum(marketscreener_forecast_failures.values()),
+            ", ".join(f"{reason}: {count}" for reason, count in sorted(marketscreener_forecast_failures.items())),
         )
 
     dcf_operations = [UpdateOne({"Ticker": ticker}, {"$set": record}, upsert=True) for ticker, record in dcf_records]

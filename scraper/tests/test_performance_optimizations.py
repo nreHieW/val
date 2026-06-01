@@ -48,6 +48,13 @@ class _Response:
         pass
 
 
+class _HtmlResponse(_Response):
+    def __init__(self, content, url):
+        self.content = content.encode()
+        self.text = content
+        self.url = url
+
+
 class PerformanceOptimizationTests(unittest.TestCase):
     def test_dcf_scrape_refills_worker_slots_without_waiting_for_batch_straggler(self):
         started = {}
@@ -117,6 +124,62 @@ class PerformanceOptimizationTests(unittest.TestCase):
             marketscreener._marketscreener_get("https://example.com")
 
         reset_browser_session.assert_called_once_with()
+
+    def test_marketscreener_invalid_forecast_page_is_retried(self):
+        url = "https://example.com/quote/A/finances/"
+        valid_html = """
+            <div class="card extra card--collapsible mb-15">
+                <div class="card-header extra">Projected Income Statement</div>
+                <table><tr><th>Metric</th><th>2025</th></tr></table>
+            </div>
+        """
+        with (
+            patch.object(marketscreener._MARKETSCREENER_LIMITER, "wait"),
+            patch.object(
+                marketscreener,
+                "browser_get",
+                side_effect=[_HtmlResponse("<html></html>", url), _HtmlResponse(valid_html, url)],
+            ) as browser_get,
+            patch.object(marketscreener, "reset_browser_session") as reset_browser_session,
+            patch.object(marketscreener.time, "sleep"),
+        ):
+            response = marketscreener._marketscreener_get(
+                url,
+                validator=marketscreener._validate_revenue_forecast_page,
+            )
+
+        self.assertEqual(response.text, valid_html)
+        self.assertEqual(browser_get.call_count, 2)
+        reset_browser_session.assert_called_once_with()
+
+    def test_marketscreener_forecast_section_allows_additional_card_classes(self):
+        soup = marketscreener.BeautifulSoup(
+            """
+            <div class="extra mb-15 card card--collapsible">
+                <div class="extra card-header">Projected Income Statement</div>
+                <table><tr><th>Metric</th><th>2025</th></tr></table>
+            </div>
+            """,
+            "lxml",
+        )
+
+        card, table = marketscreener._forecast_income_statement_section(soup)
+
+        self.assertIsNotNone(card)
+        self.assertIsNotNone(table)
+
+    def test_marketscreener_historical_only_page_is_not_used_as_forecast(self):
+        url = "https://example.com/quote/A/"
+        response = _HtmlResponse(
+            "<html></html>",
+            "https://example.com/quote/A/finances-income-statement/",
+        )
+        with patch.object(marketscreener, "_marketscreener_get", return_value=response):
+            with self.assertRaisesRegex(
+                marketscreener.MarketScreenerForecastUnavailable,
+                "No forecast page available",
+            ):
+                marketscreener.get_revenue_forecasts(url)
 
     def test_marketscreener_restored_url_cache_avoids_search_request(self):
         with (

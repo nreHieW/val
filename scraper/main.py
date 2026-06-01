@@ -82,7 +82,12 @@ def _get_ticker_chunk(tickers):
     if not 0 <= chunk_index < chunk_count:
         raise ValueError("SCRAPE_CHUNK_INDEX must be between 0 and SCRAPE_CHUNK_COUNT - 1")
 
-    chunk_size = (len(tickers) + chunk_count - 1) // chunk_count
+    configured_chunk_size = os.getenv("SCRAPE_CHUNK_SIZE")
+    chunk_size = int(configured_chunk_size) if configured_chunk_size else (len(tickers) + chunk_count - 1) // chunk_count
+    if chunk_size < 1:
+        raise ValueError("SCRAPE_CHUNK_SIZE must be at least 1")
+    if len(tickers) > chunk_count * chunk_size:
+        raise ValueError("Ticker count exceeds configured scrape chunk capacity")
     start = chunk_index * chunk_size
     chunk = tickers[start : start + chunk_size]
     logger.info("Ticker chunk %s of %s loaded: %s tickers", chunk_index + 1, chunk_count, len(chunk))

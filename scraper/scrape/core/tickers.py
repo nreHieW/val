@@ -29,9 +29,6 @@ _EXCLUDED_NAME_FRAGMENTS = (
     " acquisition corporation",
     " spac",
 )
-_EXCLUDED_SYMBOL_SUFFIXES = ("W", "WS", "WT", "U", "R")
-
-
 def _read_pipe_table(url):
     response = request_get(url, timeout=30)
     response.raise_for_status()
@@ -47,7 +44,6 @@ def _is_common_operating_stock(symbol, name, etf, test_issue):
         or test_issue.upper() == "Y"
         or any(fragment in name for fragment in _EXCLUDED_NAME_FRAGMENTS)
         or any(char in symbol for char in ".$^")
-        or (len(symbol) > 1 and symbol.endswith(_EXCLUDED_SYMBOL_SUFFIXES))
     )
 
 

@@ -13,6 +13,7 @@ import numpy as np
 import main
 from scrape.core import http_utils
 from scrape.core.rate_limit import RateLimiter
+from scrape.core.tickers import _is_common_operating_stock
 from scrape.sources import marketscreener, yahoo_profiles, yahoo_snapshot
 from scrape.valuation import dcf_inputs, string_mapper
 
@@ -97,6 +98,49 @@ class PerformanceOptimizationTests(unittest.TestCase):
 
         self.assertEqual([len(chunk) for chunk in chunks], [842, 842, 842, 842, 838])
         self.assertEqual([ticker for chunk in chunks for ticker in chunk], tickers)
+
+    def test_fixed_size_ticker_chunks_keep_overflow_partition_small(self):
+        tickers = list(range(4643))
+        chunks = []
+        for chunk_index in range(6):
+            with patch.dict(
+                os.environ,
+                {
+                    "SCRAPE_CHUNK_COUNT": "6",
+                    "SCRAPE_CHUNK_INDEX": str(chunk_index),
+                    "SCRAPE_CHUNK_SIZE": "900",
+                },
+            ):
+                chunks.append(main._get_ticker_chunk(tickers))
+
+        self.assertEqual([len(chunk) for chunk in chunks], [900, 900, 900, 900, 900, 143])
+        self.assertEqual([ticker for chunk in chunks for ticker in chunk], tickers)
+
+    def test_fixed_size_ticker_chunks_fail_when_capacity_is_exceeded(self):
+        with patch.dict(
+            os.environ,
+            {
+                "SCRAPE_CHUNK_COUNT": "6",
+                "SCRAPE_CHUNK_INDEX": "0",
+                "SCRAPE_CHUNK_SIZE": "900",
+            },
+        ):
+            with self.assertRaisesRegex(ValueError, "exceeds configured scrape chunk capacity"):
+                main._get_ticker_chunk(list(range(5401)))
+
+    def test_common_stock_filter_does_not_exclude_valid_symbol_suffixes(self):
+        for ticker in ["MU", "ACMR", "ACIW"]:
+            with self.subTest(ticker=ticker):
+                self.assertTrue(_is_common_operating_stock(ticker, f"{ticker} Inc. - Common Stock", "N", "N"))
+
+    def test_common_stock_filter_excludes_derivatives_by_security_name(self):
+        for ticker, name in [
+            ("AACBU", "Artius II Acquisition Inc. - Units"),
+            ("AACBR", "Artius II Acquisition Inc. - Rights"),
+            ("AACIW", "Armada Acquisition Corp. III - Warrant"),
+        ]:
+            with self.subTest(ticker=ticker):
+                self.assertFalse(_is_common_operating_stock(ticker, name, "N", "N"))
 
     def test_sector_industry_scrape_can_be_deferred_to_the_final_chunk(self):
         with patch.object(main, "get_sector_industries") as get_sector_industries:

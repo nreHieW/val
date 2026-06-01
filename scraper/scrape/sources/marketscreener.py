@@ -301,6 +301,20 @@ def _forecast_income_statement_section(soup):
     return None, None
 
 
+def _forecast_currency_and_unit(card):
+    superscript = card.find("sup")
+    if not superscript or not superscript.attrs.get("title"):
+        return "", ""
+
+    title = superscript.attrs["title"].strip()
+    currency_match = re.search(r"\b[A-Z]{3}\b", title)
+    unit_match = re.search(r"\b(trillion|billion|million|thousand)\b", title, re.IGNORECASE)
+    return (
+        currency_match.group(0) if currency_match else "",
+        unit_match.group(1) if unit_match else "",
+    )
+
+
 def _is_forecast_page(url):
     return urlparse(str(url)).path.rstrip("/").endswith("/finances")
 
@@ -333,13 +347,7 @@ def get_revenue_forecasts(url, cancel_event=None):
         income_statement.set_index(income_statement.columns[0], inplace=True)
         income_statement.index = income_statement.index.str.strip()
 
-        superscript = card.find("sup")
-        currency = ""
-        unit = ""
-        if superscript and superscript.attrs.get("title"):
-            title = superscript.attrs["title"].strip().split()
-            currency = title[0] if len(title) > 0 else ""
-            unit = title[-1] if len(title) > 1 else ""
+        currency, unit = _forecast_currency_and_unit(card)
 
         unit_multiplier = {
             "trillion": 1e12,

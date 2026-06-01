@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 5
+      max-parallel: 6
       matrix:
         include:
           - chunk_index: 0
@@ -25,6 +25,8 @@ jobs:
           - chunk_index: 3
             run_sector_industries: "0"
           - chunk_index: 4
+            run_sector_industries: "0"
+          - chunk_index: 5
             run_sector_industries: "1"
     defaults:
       run:
@@ -53,8 +55,9 @@ jobs:
           MONGODB_DB_PASSWORD: ${{ secrets.MONGODB_DB_PASSWORD }}
           MONGODB_DB_NAME: ${{ secrets.MONGODB_DB_NAME }}
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
-          SCRAPE_CHUNK_COUNT: "5"
+          SCRAPE_CHUNK_COUNT: "6"
           SCRAPE_CHUNK_INDEX: ${{ matrix.chunk_index }}
+          SCRAPE_CHUNK_SIZE: "900"
           RUN_SECTOR_INDUSTRY_SCRAPE: ${{ matrix.run_sector_industries }}
           TQDM_DISABLE: "1"
         run: uv run main.py

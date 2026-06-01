@@ -182,7 +182,7 @@ class PerformanceOptimizationTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 marketscreener.MarketScreenerForecastUnavailable,
-                "redirected forecast request",
+                "no analyst forecast page",
             ):
                 marketscreener.get_revenue_forecasts(url)
 

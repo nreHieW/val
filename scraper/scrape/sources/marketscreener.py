@@ -48,6 +48,10 @@ class MarketScreenerForecastUnavailable(ValueError):
     """Raised when MarketScreener exposes historical financials but no forecast page."""
 
 
+class MarketScreenerForecastRedirect(RuntimeError):
+    """Raised when MarketScreener unexpectedly redirects a forecast request."""
+
+
 def _increment_stat(name, amount=1):
     with _MARKETSCREENER_STATS_LOCK:
         _MARKETSCREENER_STATS[name] += amount
@@ -303,7 +307,11 @@ def _is_forecast_page(url):
 
 def _validate_revenue_forecast_page(response):
     if not _is_forecast_page(response.url):
-        raise MarketScreenerForecastUnavailable(
+        if urlparse(str(response.url)).path.rstrip("/").endswith("/finances-income-statement"):
+            raise MarketScreenerForecastUnavailable(
+                f"MarketScreener has no analyst forecast page; redirected request to {str(response.url)!r}"
+            )
+        raise MarketScreenerForecastRedirect(
             f"MarketScreener redirected forecast request to {str(response.url)!r}"
         )
     soup = BeautifulSoup(response.content, features="lxml")

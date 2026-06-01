@@ -48,9 +48,8 @@ def marketscreener_forecast_error(record):
 
 
 def _forecast_error_category(error):
-    if "MarketScreener redirected forecast request" in error and "/finances-income-statement/" in error:
-        return "MarketScreener redirected forecast request to historical income statement"
     for marker in (
+        "MarketScreener has no analyst forecast page",
         "MarketScreener redirected forecast request",
         "MarketScreener forecast page missing income statement section",
         "MarketScreener anti-bot page returned",
@@ -110,6 +109,7 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
     yahoo_overviews = {}
     dcf_records = []
     marketscreener_forecast_failures = Counter()
+    marketscreener_forecast_failure_samples = {}
     processing_started = time.monotonic()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=DCF_MAX_WORKERS) as executor, concurrent.futures.ThreadPoolExecutor(max_workers=MARKETSCREENER_MAX_WORKERS) as marketscreener_executor:
@@ -158,7 +158,11 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
                 if dcf_inputs:
                     forecast_error = marketscreener_forecast_error(dcf_inputs)
                     if forecast_error:
-                        marketscreener_forecast_failures[_forecast_error_category(forecast_error)] += 1
+                        category = _forecast_error_category(forecast_error)
+                        marketscreener_forecast_failures[category] += 1
+                        marketscreener_forecast_failure_samples.setdefault(category, [])
+                        if len(marketscreener_forecast_failure_samples[category]) < 5:
+                            marketscreener_forecast_failure_samples[category].append(ticker)
                     else:
                         dcf_records.append((ticker, dcf_inputs))
                 if yahoo_profile:
@@ -189,6 +193,13 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
             "MarketScreener forecast failures: %s tickers skipped from DCF DB update (%s)",
             sum(marketscreener_forecast_failures.values()),
             ", ".join(f"{reason}: {count}" for reason, count in sorted(marketscreener_forecast_failures.items())),
+        )
+        logger.warning(
+            "MarketScreener forecast failure samples: %s",
+            "; ".join(
+                f"{reason}: {', '.join(tickers)}"
+                for reason, tickers in sorted(marketscreener_forecast_failure_samples.items())
+            ),
         )
 
     dcf_operations = [UpdateOne({"Ticker": ticker}, {"$set": record}, upsert=True) for ticker, record in dcf_records]

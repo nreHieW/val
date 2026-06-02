@@ -10,7 +10,7 @@ import {
 } from "./dataHelpers";
 import CardItem from "./card-item";
 import InputForm from "./input-form";
-import { DcfInput, reverseDcf } from "@/lib/dcf";
+import { DcfInput, dcf, reverseDcf } from "@/lib/dcf";
 import { DCFInputData, UserDCFInputs } from "./types";
 import InfoHover from "../info-hover";
 import OverviewTab from "./overview-tab";
@@ -23,6 +23,8 @@ function formatNumber(value: number | null | undefined) {
 function formatPercent(value: number | null | undefined) {
   return value == null || !Number.isFinite(value) ? "—" : `${(value * 100).toFixed(2)}%`;
 }
+
+const revenueGrowthSensitivityDeltas = [-0.05, -0.025, 0, 0.025, 0.05];
 
 export default async function TickerDisplay({
   ticker,
@@ -58,6 +60,19 @@ export default async function TickerDisplay({
       ? null
       : terminalData.fcff / terminalSpread;
   const reverseDcfOutput = reverseDcf(dcfInputs as DcfInput);
+  const sensitivityRows = revenueGrowthSensitivityDeltas.map((delta) => {
+    const scenarioGrowth = dcfInputs.compounded_annual_revenue_growth_rate + delta;
+    const scenarioOutput = dcf({
+      ...(dcfInputs as DcfInput),
+      compounded_annual_revenue_growth_rate: scenarioGrowth,
+    });
+    return {
+      delta,
+      growth: scenarioGrowth,
+      value: scenarioOutput.value_per_share,
+      change: scenarioOutput.value_per_share - value_per_share,
+    };
+  });
   const incomeStatementData = createIncomeStatementData(df);
   const revenues = df.map((item: any) => formatAmount(item.revenues));
   return (
@@ -138,6 +153,36 @@ export default async function TickerDisplay({
           </div>
         </section>
 
+        <section className="pt-10 sm:pt-12">
+          <CardItem
+            title="Revenue Growth Sensitivity"
+            tooltip="Shows value per share when the compounded annual revenue growth rate changes while all other DCF assumptions stay fixed."
+          >
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="text-muted-foreground">
+                  <tr className="border-b border-border/50">
+                    <th className="py-2 pr-3 text-left font-normal">CAGR Change</th>
+                    <th className="py-2 px-3 text-right font-normal">Revenue CAGR</th>
+                    <th className="py-2 px-3 text-right font-normal">Value / Share</th>
+                    <th className="py-2 pl-3 text-right font-normal">Change</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sensitivityRows.map((row) => (
+                    <tr key={row.delta} className="border-b border-border/30 last:border-0">
+                      <td className="py-2 pr-3">{row.delta === 0 ? "Base" : `${row.delta > 0 ? "+" : ""}${(row.delta * 100).toFixed(1)} pp`}</td>
+                      <td className="py-2 px-3 text-right">{formatPercent(row.growth)}</td>
+                      <td className="py-2 px-3 text-right font-medium">{formatAmount(row.value, true)}</td>
+                      <td className={"py-2 pl-3 text-right " + (row.change > 0 ? "text-signal-positive" : row.change < 0 ? "text-signal-negative" : "text-muted-foreground")}>{row.change === 0 ? "—" : formatAmount(row.change, true)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </CardItem>
+        </section>
+
         <section className="pt-10 sm:pt-14">
           <InputForm
             defaults={{
@@ -152,6 +197,7 @@ export default async function TickerDisplay({
               target_pre_tax_operating_margin:
                 dcfInputs.target_pre_tax_operating_margin,
               discount_rate: df[0].cost_of_capital,
+              revenue_growth_rates: df.map((row: { revenue_growth_rate: number }) => row.revenue_growth_rate),
               year_of_convergence_for_margin:
                 dcfInputs.year_of_convergence_for_margin,
               years_of_high_growth: dcfInputs.years_of_high_growth,

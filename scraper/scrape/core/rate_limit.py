@@ -5,19 +5,14 @@ from contextlib import contextmanager
 
 from yfinance.exceptions import YFRateLimitError
 
-from scrape.core.config import (
-    YAHOO_CALL_MAX_CONCURRENCY,
-    YAHOO_CALL_MIN_INTERVAL_SECONDS,
-    YAHOO_COOLDOWN_SECONDS,
-    YAHOO_INFO_RETRIES,
-    YAHOO_INFO_RETRY_SLEEP_SECONDS,
-)
+from scrape.core.cancellation import sleep_with_cancel
+from scrape.core.policies import YAHOO
 
 
 class RateLimiter:
-    """Thread-safe minimum-interval limiter for fragile remote endpoints."""
-
     def __init__(self, min_interval_seconds: float, jitter_seconds: float = 0.0):
+        if min_interval_seconds < 0 or jitter_seconds < 0:
+            raise ValueError("Rate limiter intervals must be non-negative")
         self.min_interval_seconds = min_interval_seconds
         self.jitter_seconds = jitter_seconds
         self._lock = threading.Lock()
@@ -33,17 +28,18 @@ class RateLimiter:
             self._next_allowed_at = max(now, self._next_allowed_at) + interval
 
         if sleep_seconds:
-            if cancel_event is None:
-                time.sleep(sleep_seconds)
-            elif cancel_event.wait(sleep_seconds):
-                raise TimeoutError("Rate-limited request cancelled")
+            sleep_with_cancel(sleep_seconds, cancel_event, "Rate-limited request cancelled")
 
 
 class YahooRateLimiter:
     def __init__(self, max_concurrency: int, min_interval_seconds: float, cooldown_seconds: float):
-        self._semaphore = threading.BoundedSemaphore(max(1, max_concurrency))
-        self._min_interval_seconds = max(0.0, min_interval_seconds)
-        self._cooldown_seconds = max(0.0, cooldown_seconds)
+        if max_concurrency < 1:
+            raise ValueError("Yahoo max concurrency must be positive")
+        if min_interval_seconds < 0 or cooldown_seconds < 0:
+            raise ValueError("Yahoo rate limiter intervals must be non-negative")
+        self._semaphore = threading.BoundedSemaphore(max_concurrency)
+        self._min_interval_seconds = min_interval_seconds
+        self._cooldown_seconds = cooldown_seconds
         self._lock = threading.Lock()
         self._next_allowed_at = 0.0
 
@@ -51,50 +47,40 @@ class YahooRateLimiter:
     def slot(self):
         self._semaphore.acquire()
         try:
-            self._wait_for_turn()
+            with self._lock:
+                now = time.monotonic()
+                if now < self._next_allowed_at:
+                    time.sleep(self._next_allowed_at - now)
+                    now = time.monotonic()
+                self._next_allowed_at = now + self._min_interval_seconds
             yield
         except YFRateLimitError:
-            self.cooldown()
+            if self._cooldown_seconds > 0:
+                with self._lock:
+                    self._next_allowed_at = max(self._next_allowed_at, time.monotonic() + self._cooldown_seconds)
             raise
         finally:
             self._semaphore.release()
 
-    def _wait_for_turn(self):
-        with self._lock:
-            now = time.monotonic()
-            if now < self._next_allowed_at:
-                time.sleep(self._next_allowed_at - now)
-                now = time.monotonic()
-            self._next_allowed_at = now + self._min_interval_seconds
-
-    def cooldown(self):
-        if self._cooldown_seconds <= 0:
-            return
-        with self._lock:
-            self._next_allowed_at = max(self._next_allowed_at, time.monotonic() + self._cooldown_seconds)
-
 
 YAHOO_RATE_LIMITER = YahooRateLimiter(
-    max_concurrency=YAHOO_CALL_MAX_CONCURRENCY,
-    min_interval_seconds=YAHOO_CALL_MIN_INTERVAL_SECONDS,
-    cooldown_seconds=YAHOO_COOLDOWN_SECONDS,
+    max_concurrency=YAHOO.max_concurrency,
+    min_interval_seconds=YAHOO.call_rate_limit.min_interval_seconds,
+    cooldown_seconds=YAHOO.cooldown_seconds,
 )
 
 
 def yahoo_call(fn, *, retries: int | None = None, retry_sleep_seconds: float | None = None):
-    retries = YAHOO_INFO_RETRIES if retries is None else retries
-    retry_sleep_seconds = YAHOO_INFO_RETRY_SLEEP_SECONDS if retry_sleep_seconds is None else retry_sleep_seconds
-    last_error = None
+    retries = YAHOO.retry.attempts if retries is None else retries
+    retry_sleep_seconds = YAHOO.retry.backoff_seconds if retry_sleep_seconds is None else retry_sleep_seconds
+    if retries < 1:
+        raise ValueError("Yahoo retries must be positive")
     for attempt in range(retries):
         try:
             with YAHOO_RATE_LIMITER.slot():
                 return fn()
-        except YFRateLimitError as e:
-            last_error = e
+        except YFRateLimitError:
             if attempt == retries - 1:
                 raise
             sleep_for = retry_sleep_seconds * (attempt + 1) + random.uniform(0, 1)
             time.sleep(sleep_for)
-    if last_error:
-        raise last_error
-    return None

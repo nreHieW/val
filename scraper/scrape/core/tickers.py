@@ -2,6 +2,7 @@ import csv
 import re
 from io import StringIO
 
+from scrape.core.config import REQUEST_TIMEOUT_SECONDS
 from scrape.core.http_utils import request_get
 
 _NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
@@ -49,7 +50,7 @@ _OPERATING_TRUST_PATTERN = re.compile(
 
 
 def _read_pipe_table(url):
-    response = request_get(url, timeout=30)
+    response = request_get(url, timeout=REQUEST_TIMEOUT_SECONDS)
     response.raise_for_status()
     lines = [line for line in response.text.splitlines() if line and not line.startswith("File Creation Time:")]
     return csv.DictReader(StringIO("\n".join(lines)), delimiter="|")
@@ -72,24 +73,15 @@ def _is_common_operating_stock(symbol, name, etf, test_issue):
 
 def get_all_tickers():
     tickers = []
-    for row in _read_pipe_table(_NASDAQ_LISTED_URL):
-        symbol = row.get("Symbol", "").strip()
-        if _is_common_operating_stock(
-            symbol,
-            row.get("Security Name", ""),
-            row.get("ETF", ""),
-            row.get("Test Issue", ""),
-        ):
-            tickers.append(symbol)
-
-    for row in _read_pipe_table(_OTHER_LISTED_URL):
-        symbol = row.get("ACT Symbol", "").strip()
-        if _is_common_operating_stock(
-            symbol,
-            row.get("Security Name", ""),
-            row.get("ETF", ""),
-            row.get("Test Issue", ""),
-        ):
-            tickers.append(symbol)
+    for url, symbol_column in ((_NASDAQ_LISTED_URL, "Symbol"), (_OTHER_LISTED_URL, "ACT Symbol")):
+        for row in _read_pipe_table(url):
+            symbol = row.get(symbol_column, "").strip()
+            if _is_common_operating_stock(
+                symbol,
+                row.get("Security Name", ""),
+                row.get("ETF", ""),
+                row.get("Test Issue", ""),
+            ):
+                tickers.append(symbol)
 
     return sorted(set(tickers))

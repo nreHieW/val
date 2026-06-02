@@ -12,15 +12,10 @@ import numpy as np
 import pandas as pd
 from bs4 import BeautifulSoup
 
-from scrape.core.config import (
-    JSON_LOCK,
-    MARKETSCREENER_JITTER_SECONDS,
-    MARKETSCREENER_MAX_WORKERS,
-    MARKETSCREENER_MIN_INTERVAL_SECONDS,
-    MARKETSCREENER_RETRIES,
-    MARKETSCREENER_RETRY_SLEEP_SECONDS,
-)
+from scrape.core.cancellation import raise_if_cancelled, sleep_with_cancel
+from scrape.core.config import JSON_LOCK, MARKETSCREENER_MAX_WORKERS
 from scrape.core.http_utils import browser_get, reset_browser_session
+from scrape.core.policies import MARKETSCREENER
 from scrape.core.rate_limit import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -32,7 +27,10 @@ _MARKETSCREENER_CACHE_UPDATES_SINCE_SAVE = 0
 _MARKETSCREENER_CACHE_SAVE_INTERVAL = 25
 _MARKETSCREENER_IMPERSONATE = ("chrome124", "chrome120", "safari184")
 _MARKETSCREENER_SEMAPHORE = threading.BoundedSemaphore(MARKETSCREENER_MAX_WORKERS)
-_MARKETSCREENER_LIMITER = RateLimiter(MARKETSCREENER_MIN_INTERVAL_SECONDS, MARKETSCREENER_JITTER_SECONDS)
+_MARKETSCREENER_LIMITER = RateLimiter(
+    MARKETSCREENER.rate_limit.min_interval_seconds,
+    MARKETSCREENER.rate_limit.jitter_seconds,
+)
 _MARKETSCREENER_STATS = {
     "cache_hits": 0,
     "cache_misses": 0,
@@ -42,14 +40,15 @@ _MARKETSCREENER_STATS = {
     "http_seconds": 0.0,
 }
 _MARKETSCREENER_STATS_LOCK = threading.Lock()
+_CANCELLED = "MarketScreener request cancelled"
 
 
 class MarketScreenerForecastUnavailable(ValueError):
-    """Raised when MarketScreener exposes historical financials but no forecast page."""
+    pass
 
 
 class MarketScreenerForecastRedirect(RuntimeError):
-    """Raised when MarketScreener unexpectedly redirects a forecast request."""
+    pass
 
 
 def _increment_stat(name, amount=1):
@@ -100,18 +99,6 @@ def save_marketscreener_cache():
         _save_marketscreener_cache_locked()
 
 
-def _raise_if_cancelled(cancel_event):
-    if cancel_event is not None and cancel_event.is_set():
-        raise TimeoutError("MarketScreener request cancelled")
-
-
-def _sleep_with_cancel(seconds, cancel_event):
-    if cancel_event is None:
-        time.sleep(seconds)
-    elif cancel_event.wait(seconds):
-        _raise_if_cancelled(cancel_event)
-
-
 def _marketscreener_search(ticker, query, cancel_event=None):
     search_url = "https://www.marketscreener.com/search/?q=" + "+".join(query.split())
     page = _marketscreener_get(search_url, cancel_event)
@@ -120,9 +107,14 @@ def _marketscreener_search(ticker, query, cancel_event=None):
         ticker_tag = row.find("td", {"class": "txt-bold"})
         currency_tag = row.find("span", {"class": "txt-muted"})
         link_tag = row.find("a", href=True)
-        if ticker_tag and currency_tag and link_tag:
-            if ticker_tag.text.strip() == ticker and currency_tag.text.strip() == "USD":
-                return "https://www.marketscreener.com" + link_tag["href"]
+        if (
+            ticker_tag
+            and currency_tag
+            and link_tag
+            and ticker_tag.text.strip() == ticker
+            and currency_tag.text.strip() == "USD"
+        ):
+            return "https://www.marketscreener.com" + link_tag["href"]
     return None
 
 
@@ -142,37 +134,37 @@ def get_marketscreener_url(ticker, name: str = "", cancel_event=None):
 
     found_link = None
     for query in queries:
-        _raise_if_cancelled(cancel_event)
+        raise_if_cancelled(cancel_event, _CANCELLED)
         found_link = _marketscreener_search(ticker, query, cancel_event)
         if found_link:
             break
 
     if not found_link:
-        logger.debug("Could not find %s on marketscreener", ticker)
-    else:
-        with JSON_LOCK:
-            _MARKETSCREENER_CACHE[ticker] = found_link
-            _MARKETSCREENER_CACHE_DIRTY = True
-            _MARKETSCREENER_CACHE_UPDATES_SINCE_SAVE += 1
-            if _MARKETSCREENER_CACHE_UPDATES_SINCE_SAVE >= _MARKETSCREENER_CACHE_SAVE_INTERVAL:
-                _save_marketscreener_cache_locked()
+        logger.debug("Could not find %s on MarketScreener", ticker)
+        return None
+
+    with JSON_LOCK:
+        _MARKETSCREENER_CACHE[ticker] = found_link
+        _MARKETSCREENER_CACHE_DIRTY = True
+        _MARKETSCREENER_CACHE_UPDATES_SINCE_SAVE += 1
+        if _MARKETSCREENER_CACHE_UPDATES_SINCE_SAVE >= _MARKETSCREENER_CACHE_SAVE_INTERVAL:
+            _save_marketscreener_cache_locked()
 
     return found_link
 
 
 def _marketscreener_get(url, cancel_event=None, validator=None):
-    last_error = None
-    for attempt in range(MARKETSCREENER_RETRIES):
+    for attempt in range(MARKETSCREENER.retry.attempts):
         try:
-            _raise_if_cancelled(cancel_event)
+            raise_if_cancelled(cancel_event, _CANCELLED)
             limiter_started = time.monotonic()
             try:
                 _MARKETSCREENER_LIMITER.wait(cancel_event)
             finally:
                 _increment_stat("limiter_wait_seconds", time.monotonic() - limiter_started)
-            _raise_if_cancelled(cancel_event)
+            raise_if_cancelled(cancel_event, _CANCELLED)
             with _MARKETSCREENER_SEMAPHORE:
-                _raise_if_cancelled(cancel_event)
+                raise_if_cancelled(cancel_event, _CANCELLED)
                 _increment_stat("requests")
                 http_started = time.monotonic()
                 try:
@@ -182,10 +174,10 @@ def _marketscreener_get(url, cancel_event=None, validator=None):
                     )
                 finally:
                     _increment_stat("http_seconds", time.monotonic() - http_started)
-            _raise_if_cancelled(cancel_event)
+            raise_if_cancelled(cancel_event, _CANCELLED)
             response.raise_for_status()
             text = response.text.lower()
-            if response.status_code in {403, 429, 503} or any(
+            if any(
                 marker in text
                 for marker in ("cf-chl", "g-recaptcha-response", "access denied", "too many requests")
             ):
@@ -193,14 +185,13 @@ def _marketscreener_get(url, cancel_event=None, validator=None):
             if validator is not None:
                 validator(response)
             return response
-        except Exception as e:
-            last_error = e
-            _raise_if_cancelled(cancel_event)
-            if attempt < MARKETSCREENER_RETRIES - 1:
-                _increment_stat("retries")
-                reset_browser_session()
-                _sleep_with_cancel(MARKETSCREENER_RETRY_SLEEP_SECONDS * (attempt + 1), cancel_event)
-    raise last_error
+        except Exception:
+            raise_if_cancelled(cancel_event, _CANCELLED)
+            if attempt == MARKETSCREENER.retry.attempts - 1:
+                raise
+            _increment_stat("retries")
+            reset_browser_session()
+            sleep_with_cancel(MARKETSCREENER.retry.backoff(attempt), cancel_event, _CANCELLED)
 
 
 def _marketscreener_number(value):
@@ -301,27 +292,10 @@ def _forecast_income_statement_section(soup):
     return None, None
 
 
-def _forecast_currency_and_unit(card):
-    superscript = card.find("sup")
-    if not superscript or not superscript.attrs.get("title"):
-        return "", ""
-
-    title = superscript.attrs["title"].strip()
-    currency_match = re.search(r"\b[A-Z]{3}\b", title)
-    unit_match = re.search(r"\b(trillion|billion|million|thousand)\b", title, re.IGNORECASE)
-    return (
-        currency_match.group(0) if currency_match else "",
-        unit_match.group(1) if unit_match else "",
-    )
-
-
-def _is_forecast_page(url):
-    return urlparse(str(url)).path.rstrip("/").endswith("/finances")
-
-
 def _validate_revenue_forecast_page(response):
-    if not _is_forecast_page(response.url):
-        if urlparse(str(response.url)).path.rstrip("/").endswith("/finances-income-statement"):
+    path = urlparse(str(response.url)).path.rstrip("/")
+    if not path.endswith("/finances"):
+        if path.endswith("/finances-income-statement"):
             raise MarketScreenerForecastUnavailable(
                 f"MarketScreener has no analyst forecast page; redirected request to {str(response.url)!r}"
             )
@@ -340,65 +314,70 @@ def get_revenue_forecasts(url, cancel_event=None):
 
     soup = BeautifulSoup(page.content, features="lxml")
     card, table = _forecast_income_statement_section(soup)
-    if table is not None:
-        income_statement = pd.read_html(StringIO(str(table)))[0]
-        income_statement = income_statement.dropna(axis=1, how="all")
-        income_statement.iloc[:, 0] = income_statement.iloc[:, 0].str.replace(r"\d", "", regex=True)
-        income_statement.set_index(income_statement.columns[0], inplace=True)
-        income_statement.index = income_statement.index.str.strip()
+    income_statement = pd.read_html(StringIO(str(table)))[0]
+    income_statement = income_statement.dropna(axis=1, how="all")
+    income_statement.iloc[:, 0] = income_statement.iloc[:, 0].str.replace(r"\d", "", regex=True)
+    income_statement.set_index(income_statement.columns[0], inplace=True)
+    income_statement.index = income_statement.index.str.strip()
 
-        currency, unit = _forecast_currency_and_unit(card)
+    currency = ""
+    unit = ""
+    superscript = card.find("sup")
+    if superscript and superscript.attrs.get("title"):
+        title = superscript.attrs["title"].strip()
+        currency_match = re.search(r"\b[A-Z]{3}\b", title)
+        unit_match = re.search(r"\b(trillion|billion|million|thousand)\b", title, re.IGNORECASE)
+        currency = currency_match.group(0) if currency_match else ""
+        unit = unit_match.group(1) if unit_match else ""
 
-        unit_multiplier = {
-            "trillion": 1e12,
-            "billion": 1e9,
-            "million": 1e6,
-            "thousand": 1e3,
-        }.get(unit.lower(), 1)
+    unit_multiplier = {
+        "trillion": 1e12,
+        "billion": 1e9,
+        "million": 1e6,
+        "thousand": 1e3,
+    }.get(unit.lower(), 1)
 
-        indiv = income_statement.loc[["Net sales"]].apply(
-            lambda column: pd.to_numeric(column.astype(str).str.replace(",", ""), errors="coerce")
+    indiv = income_statement.loc[["Net sales"]].apply(
+        lambda column: pd.to_numeric(column.astype(str).str.replace(",", ""), errors="coerce")
+    )
+    curr_year = datetime.datetime.now().year - 1
+    if str(curr_year) not in indiv.columns:
+        raise ValueError(f"Income statement missing required net sales year column {str(curr_year)!r}")
+
+    curr_year_index = indiv.columns.get_loc(str(curr_year))
+    indiv = indiv.iloc[:, curr_year_index:].astype(float)
+    consensus_revenues = {
+        str(column): float(value) * unit_multiplier
+        for column, value in indiv.iloc[0].items()
+        if pd.notna(value)
+    }
+    growth = indiv.pct_change(axis=1)
+    revenue_growth_rate_next_year = float(growth.values[0][1]) if growth.shape[1] > 1 and pd.notna(growth.values[0][1]) else 0
+    raw_compounded_growth_rates = [value for value in growth.values[0][1:] if pd.notna(value)]
+    compounded_annual_revenue_growth_rate = float(np.mean(raw_compounded_growth_rates)) if raw_compounded_growth_rates else 0
+    ebit = pd.Series(dtype=float)
+    if "EBIT" in income_statement.index:
+        ebit = income_statement.loc["EBIT", indiv.columns].apply(
+            lambda x: pd.to_numeric(str(x).replace(",", ""), errors="coerce")
         )
-        curr_year = datetime.datetime.now().year - 1
-        if str(curr_year) not in indiv.columns:
-            raise ValueError(f"Income statement missing required net sales year column {str(curr_year)!r}")
+    consensus_ebit = {
+        str(column): float(value) * unit_multiplier
+        for column, value in ebit.items()
+        if pd.notna(value)
+    }
 
-        curr_year_index = indiv.columns.get_loc(str(curr_year))
-        indiv = indiv.iloc[:, curr_year_index:].astype(float)
-        consensus_revenues = {
-            str(column): float(value) * unit_multiplier
-            for column, value in indiv.iloc[0].items()
-            if pd.notna(value)
-        }
-        growth = indiv.pct_change(axis=1)
-        revenue_growth_rate_next_year = float(growth.values[0][1]) if growth.shape[1] > 1 and pd.notna(growth.values[0][1]) else 0
-        raw_compounded_growth_rates = [value for value in growth.values[0][1:] if pd.notna(value)]
-        compounded_annual_revenue_growth_rate = float(np.mean(raw_compounded_growth_rates)) if raw_compounded_growth_rates else 0
-        ebit = pd.Series(dtype=float)
-        if "EBIT" in income_statement.index:
-            ebit = income_statement.loc["EBIT", indiv.columns].apply(
-                lambda x: pd.to_numeric(str(x).replace(",", ""), errors="coerce")
-            )
-        consensus_ebit = {
-            str(column): float(value) * unit_multiplier
-            for column, value in ebit.items()
-            if pd.notna(value)
-        }
-
-        op_margins = ebit / indiv if not ebit.empty else pd.DataFrame()
-        op_margin_next_year = (
-            op_margins[[str(curr_year + 2)]].iloc[0].values[0]
-            if not op_margins.empty and str(curr_year + 2) in op_margins.columns
-            else 0
-        )  # MarketScreener has some inconsistencies of EBIT values versus yahoo finance
-        return {
-            "revenue_growth_rate_next_year": revenue_growth_rate_next_year,
-            "compounded_annual_revenue_growth_rate": compounded_annual_revenue_growth_rate,
-            "operating_margin_next_year": 0 if pd.isna(op_margin_next_year) else float(op_margin_next_year),
-            "consensus_revenues": consensus_revenues,
-            "consensus_ebit": consensus_ebit,
-            "currency": currency,
-            "unit": unit,
-        }
-
-    raise RuntimeError(f"MarketScreener forecast page missing income statement section for URL {url!r}")
+    op_margins = ebit / indiv if not ebit.empty else pd.DataFrame()
+    op_margin_next_year = (
+        op_margins[[str(curr_year + 2)]].iloc[0].values[0]
+        if not op_margins.empty and str(curr_year + 2) in op_margins.columns
+        else 0
+    )  # MarketScreener has some inconsistencies of EBIT values versus yahoo finance
+    return {
+        "revenue_growth_rate_next_year": revenue_growth_rate_next_year,
+        "compounded_annual_revenue_growth_rate": compounded_annual_revenue_growth_rate,
+        "operating_margin_next_year": 0 if pd.isna(op_margin_next_year) else float(op_margin_next_year),
+        "consensus_revenues": consensus_revenues,
+        "consensus_ebit": consensus_ebit,
+        "currency": currency,
+        "unit": unit,
+    }

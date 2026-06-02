@@ -22,14 +22,29 @@ YAHOO_FINANCIAL_KEYS = [
     "EBITDA Prev TTM",
     "Free Cash Flow TTM",
 ]
+_TTM_METRIC_NAMES = {
+    "Revenue": ["Total Revenue", "Operating Revenue", "Revenue"],
+    "Net Income": ["Net Income Common Stockholders", "Net Income Including Noncontrolling Interests", "Net Income"],
+    "EBIT": ["EBIT", "Operating Income"],
+}
 
 
 def with_ttm_defaults(financials):
-    result = {"Ticker": financials.get("Ticker")}
-    result.update(financials)
+    result = dict(financials)
     for key in YAHOO_FINANCIAL_KEYS:
         result.setdefault(key, None)
     return result
+
+
+def _batches(items):
+    for start in range(0, len(items), YAHOO_INFO_MAX_WORKERS):
+        yield items[start : start + YAHOO_INFO_MAX_WORKERS], start + YAHOO_INFO_MAX_WORKERS < len(items)
+
+
+def _ticker_frame(records):
+    if not records:
+        return pd.DataFrame(index=pd.Index([], name="Ticker"))
+    return pd.DataFrame(records).set_index("Ticker")
 
 
 @lru_cache(maxsize=10000)
@@ -59,7 +74,7 @@ def build_yahoo_profile(ticker, ticker_info):
 
 
 def normalize_quarterly_statement(statement: pd.DataFrame) -> pd.DataFrame:
-    if statement is None or statement.empty:
+    if statement.empty:
         return pd.DataFrame()
 
     statement = statement.copy()
@@ -111,24 +126,22 @@ def _get_sec_ttm_financials_with_fallback(ticker):
     except SecRateLimited as e:
         logger.warning("%s SEC TTM rate limited; using Yahoo latest TTM where available: %s", ticker, e)
     except Exception as e:
-        logger.debug("%s SEC TTM unavailable; using Yahoo latest TTM where available: %s", ticker, e)
+        logger.warning("%s SEC TTM unavailable; using Yahoo latest TTM where available: %s", ticker, e)
     return {"Ticker": ticker}
 
 
 def prefetch_sec_ttm_financials(tickers, cancel_event=None):
     started = time.monotonic()
     sec_financials_by_ticker = {}
-    for i in range(0, len(tickers), YAHOO_INFO_MAX_WORKERS):
+    for batch, has_more in _batches(tickers):
         if cancel_event is not None and cancel_event.is_set():
             logger.info("SEC TTM prefetch cancelled after %s tickers", len(sec_financials_by_ticker))
             break
-        batch = tickers[i : i + YAHOO_INFO_MAX_WORKERS]
         with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_INFO_MAX_WORKERS) as executor:
             results = list(executor.map(_get_sec_ttm_financials_with_fallback, batch))
-        for result in results:
-            sec_financials_by_ticker[result["Ticker"]] = result
+        sec_financials_by_ticker.update((result["Ticker"], result) for result in results)
 
-        if i + YAHOO_INFO_MAX_WORKERS < len(tickers):
+        if has_more:
             time.sleep(1)
 
     logger.info("SEC TTM prefetch completed: %s tickers in %.1fs", len(sec_financials_by_ticker), time.monotonic() - started)
@@ -142,16 +155,16 @@ def get_ttm_financials(ticker, yahoo_snapshot=None, fx_rates=None, sec_financial
         if yahoo_snapshot is not None:
             quarterly_income_stmt = yahoo_snapshot.quarterly_income_stmt
             quarterly_cashflow = yahoo_snapshot.quarterly_cashflow
-            ticker_info = yahoo_snapshot.info or {}
+            ticker_info = yahoo_snapshot.get_info()
         else:
             yahoo_ticker = YahooQueryTicker(ticker)
             quarterly_income_stmt = normalize_quarterly_statement(yahoo_ticker.quarterly_income_stmt)
             quarterly_cashflow = normalize_quarterly_statement(yahoo_ticker.quarterly_cashflow)
-            ticker_info = get_yahoo_info(ticker) or {}
+            ticker_info = get_yahoo_info(ticker)
 
         result = with_ttm_defaults(sec_financials)
         if quarterly_income_stmt.empty:
-            logger.debug("%s Yahoo quarterly income statement unavailable", ticker)
+            logger.debug("%s Yahoo quarterly income statement unavailable; using SEC TTM where available", ticker)
             return result
 
         most_recent_quarter = quarterly_income_stmt.columns[0]
@@ -171,24 +184,12 @@ def get_ttm_financials(ticker, yahoo_snapshot=None, fx_rates=None, sec_financial
         )
 
         yahoo_metrics = {
-            "Revenue": sum_statement_metric(quarterly_income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"]),
-            "Net Income": sum_statement_metric(
-                quarterly_income_stmt,
-                ["Net Income Common Stockholders", "Net Income Including Noncontrolling Interests", "Net Income"],
-            ),
-            "EBIT": sum_statement_metric(quarterly_income_stmt, ["EBIT", "Operating Income"]),
+            prefix: sum_statement_metric(quarterly_income_stmt, metric_names)
+            for prefix, metric_names in _TTM_METRIC_NAMES.items()
         }
         yahoo_prev_metrics = {
-            "Revenue": sum_statement_metric(
-                quarterly_income_stmt, ["Total Revenue", "Operating Revenue", "Revenue"], start=4, count=4
-            ),
-            "Net Income": sum_statement_metric(
-                quarterly_income_stmt,
-                ["Net Income Common Stockholders", "Net Income Including Noncontrolling Interests", "Net Income"],
-                start=4,
-                count=4,
-            ),
-            "EBIT": sum_statement_metric(quarterly_income_stmt, ["EBIT", "Operating Income"], start=4, count=4),
+            prefix: sum_statement_metric(quarterly_income_stmt, metric_names, start=4, count=4)
+            for prefix, metric_names in _TTM_METRIC_NAMES.items()
         }
         for prefix, value in yahoo_metrics.items():
             if value is not None:
@@ -221,10 +222,10 @@ def get_ttm_financials(ticker, yahoo_snapshot=None, fx_rates=None, sec_financial
 
 def compute_ttm_financials(tickers, yahoo_snapshots=None, fx_rates=None, sec_financials_by_ticker=None):
     yahoo_snapshots = yahoo_snapshots or {}
-    sec_financials_by_ticker = sec_financials_by_ticker or prefetch_sec_ttm_financials(tickers)
+    if sec_financials_by_ticker is None:
+        sec_financials_by_ticker = prefetch_sec_ttm_financials(tickers)
     ttm_financials_by_ticker = {}
-    for i in range(0, len(tickers), YAHOO_INFO_MAX_WORKERS):
-        batch = tickers[i : i + YAHOO_INFO_MAX_WORKERS]
+    for batch, has_more in _batches(tickers):
         with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_INFO_MAX_WORKERS) as executor:
             results = list(
                 executor.map(
@@ -237,30 +238,20 @@ def compute_ttm_financials(tickers, yahoo_snapshots=None, fx_rates=None, sec_fin
                     batch,
                 )
             )
-        for result in results:
-            if result:
-                ttm_financials_by_ticker[result["Ticker"]] = result
+        ttm_financials_by_ticker.update((result["Ticker"], result) for result in results)
 
-        if i + YAHOO_INFO_MAX_WORKERS < len(tickers) and any(ticker not in yahoo_snapshots for ticker in batch):
+        if has_more and any(ticker not in yahoo_snapshots for ticker in batch):
             time.sleep(1)
-
-    missing_count = len(tickers) - len(ttm_financials_by_ticker)
-    if missing_count:
-        logger.warning("TTM financials missing for %s out of %s tickers", missing_count, len(tickers))
 
     unavailable_count = sum(
         1
         for ticker in tickers
-        if not any(ttm_financials_by_ticker.get(ticker, {}).get(key) is not None for key in YAHOO_FINANCIAL_KEYS)
+        if not any(ttm_financials_by_ticker[ticker].get(key) is not None for key in YAHOO_FINANCIAL_KEYS)
     )
     if unavailable_count:
         logger.warning("TTM financials unavailable from SEC/Yahoo for %s out of %s tickers", unavailable_count, len(tickers))
 
-    ordered_financials = [ttm_financials_by_ticker[ticker] for ticker in tickers if ticker in ttm_financials_by_ticker]
-    if not ordered_financials:
-        return pd.DataFrame(columns=["Ticker"]).set_index("Ticker")
-
-    return pd.DataFrame(ordered_financials).set_index("Ticker")
+    return _ticker_frame([ttm_financials_by_ticker[ticker] for ticker in tickers])
 
 
 def get_and_parse_yahoo(tickers, cached_profiles=None, yahoo_snapshots=None):
@@ -274,35 +265,32 @@ def get_and_parse_yahoo(tickers, cached_profiles=None, yahoo_snapshots=None):
             profiles_by_ticker[ticker] = cached_profile
             continue
         snapshot = yahoo_snapshots.get(ticker)
-        if snapshot and snapshot.info:
-            profiles_by_ticker[ticker] = build_yahoo_profile(snapshot.info.get("symbol", ticker), snapshot.info)
+        if snapshot:
+            try:
+                ticker_info = snapshot.get_info()
+                profiles_by_ticker[ticker] = build_yahoo_profile(ticker_info.get("symbol", ticker), ticker_info)
+            except Exception as e:
+                logger.warning("%s snapshot profile unavailable; fetching Yahoo profile directly: %s", ticker, e)
 
     missing_tickers = [ticker for ticker in tickers if ticker not in profiles_by_ticker]
-    if missing_tickers:
-        for i in range(0, len(missing_tickers), YAHOO_INFO_MAX_WORKERS):
-            batch = missing_tickers[i : i + YAHOO_INFO_MAX_WORKERS]
-            with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_INFO_MAX_WORKERS) as executor:
-                futures = {executor.submit(get_yahoo_info, ticker): ticker for ticker in batch}
-                for future in concurrent.futures.as_completed(futures):
-                    ticker = futures[future]
-                    try:
-                        ticker_info = future.result()
-                    except Exception as e:
-                        logger.debug("%s profile skipped: %s", ticker, e)
-                        continue
-                    if ticker_info:
-                        profile = build_yahoo_profile(ticker, ticker_info)
-                        profiles_by_ticker[profile["Ticker"]] = profile
+    for batch, has_more in _batches(missing_tickers):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=YAHOO_INFO_MAX_WORKERS) as executor:
+            futures = {executor.submit(get_yahoo_info, ticker): ticker for ticker in batch}
+            for future in concurrent.futures.as_completed(futures):
+                ticker = futures[future]
+                try:
+                    ticker_info = future.result()
+                except Exception as e:
+                    logger.warning("%s profile skipped: %s", ticker, e)
+                    continue
+                profile = build_yahoo_profile(ticker, ticker_info)
+                profiles_by_ticker[profile["Ticker"]] = profile
 
-            if i + YAHOO_INFO_MAX_WORKERS < len(missing_tickers):
-                time.sleep(1)
+        if has_more:
+            time.sleep(1)
 
     missing_count = len(tickers) - len(profiles_by_ticker)
     if missing_count:
         logger.warning("Yahoo profiles missing for %s out of %s tickers", missing_count, len(tickers))
 
-    ordered_profiles = [profiles_by_ticker[ticker] for ticker in tickers if ticker in profiles_by_ticker]
-    if not ordered_profiles:
-        return pd.DataFrame(columns=["Ticker"]).set_index("Ticker")
-
-    return pd.DataFrame(ordered_profiles).set_index("Ticker")
+    return _ticker_frame([profiles_by_ticker[ticker] for ticker in tickers if ticker in profiles_by_ticker])

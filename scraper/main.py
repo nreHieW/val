@@ -1,5 +1,4 @@
 import concurrent.futures
-import json
 import logging
 import os
 import threading
@@ -12,7 +11,7 @@ from pymongo import UpdateOne
 
 from scrape.core.config import DCF_MAX_WORKERS, MARKETSCREENER_MAX_WORKERS, TICKER_TIMEOUT_SECONDS
 from scrape.core.http_utils import run_with_timeout
-from scrape.core.json_util import CustomEncoder
+from scrape.core.json_util import normalize_json
 from scrape.core.mongo import get_mongo_client
 from scrape.core.tickers import get_all_tickers
 from scrape.sources.marketscreener import load_marketscreener_cache, log_marketscreener_stats, save_marketscreener_cache
@@ -31,7 +30,9 @@ from scrape.valuation.string_mapper import StringMapper
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(levelname)s: %(message)s")
 logging.getLogger("yahooquery").setLevel(logging.WARNING)
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+_DCF_PROGRESS_INTERVAL_BATCHES = 5
 
 
 def _log_timing(label, fn, *args, **kwargs):
@@ -40,24 +41,6 @@ def _log_timing(label, fn, *args, **kwargs):
         return fn(*args, **kwargs)
     finally:
         logger.info("%s completed in %.1fs", label, time.monotonic() - started)
-
-
-def marketscreener_forecast_error(record):
-    return ((record.get("extras") or {}).get("forecast_context") or {}).get(
-        "marketscreener_forecast_error"
-    )
-
-
-def _forecast_error_category(error):
-    for marker in (
-        "MarketScreener has no analyst forecast page",
-        "MarketScreener redirected forecast request",
-        "MarketScreener forecast page missing income statement section",
-        "MarketScreener anti-bot page returned",
-    ):
-        if marker in error:
-            return marker
-    return error.split(":", 1)[0]
 
 
 def _log_dcf_progress(batch, total_batches, completed_tickers, total_tickers, started):
@@ -72,6 +55,18 @@ def _log_dcf_progress(batch, total_batches, completed_tickers, total_tickers, st
         elapsed,
         throughput,
     )
+
+
+def _log_ticker_exception(label, ticker, error):
+    tb = traceback.extract_tb(error.__traceback__)
+    if tb:
+        frame = tb[-1]
+        reason = f"{type(error).__name__} at {os.path.relpath(frame.filename)}:{frame.lineno} in {frame.name}"
+    else:
+        reason = type(error).__name__
+    logger.warning("%s failed for %s: %s", label, ticker, reason)
+    logger.debug("%s failed for %s\n%s", label, ticker, "".join(traceback.format_exception(type(error), error, error.__traceback__)))
+    return reason
 
 
 def _get_ticker_chunk(tickers):
@@ -96,12 +91,11 @@ def _get_ticker_chunk(tickers):
 
 def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
     yahoo_snapshots = yahoo_snapshots or {}
-    logger.info(f"Running DCF scrape for {len(tickers)} tickers")
+    logger.info("Running DCF scrape for %s tickers", len(tickers))
     country_erps = get_country_erp()
     region_mapper = StringMapper(list(country_erps.keys()))
     avg_metrics = get_industry_avgs()
-    avg_betas = avg_metrics["Unlevered Beta"]
-    industry_mapper = StringMapper(list(avg_betas.keys()))
+    industry_mapper = StringMapper(list(avg_metrics["Unlevered Beta"]))
     risk_free_rate = get_10year_tbill()
     mature_erp = get_mature_erp()
     fx_rates = get_exchange_rates()
@@ -109,8 +103,8 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
     db_name = os.getenv("MONGODB_DB_NAME")
     dcf_db = client[db_name]["dcf_inputs"]
     overview_db = client[db_name]["ticker_overviews"]
-    failure_counts = {}
-    skipped_counts = {}
+    failure_counts = Counter()
+    skipped_counts = Counter()
     yahoo_profiles = {}
     yahoo_overviews = {}
     dcf_records = []
@@ -126,7 +120,7 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
             try:
                 ticker = next(ticker_iter)
             except StopIteration:
-                return False
+                return
             futures[
                 executor.submit(
                     process_ticker,
@@ -142,7 +136,6 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
                     marketscreener_executor,
                 )
             ] = ticker
-            return True
 
         for _ in range(min(DCF_MAX_WORKERS, len(tickers))):
             submit_next_ticker()
@@ -156,19 +149,35 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
         while futures:
             completed, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
             for future in completed:
-                ticker = futures[future]
-                success, dcf_inputs, yahoo_profile, yahoo_overview, failure_reason = future.result()
-                del futures[future]
+                ticker = futures.pop(future)
                 completed_tickers += 1
                 submit_next_ticker()
+                try:
+                    success, dcf_inputs, yahoo_profile, yahoo_overview, failure_reason = future.result()
+                except Exception as e:
+                    failure_reason = _log_ticker_exception("DCF worker", ticker, e)
+                    failure_counts[failure_reason] += 1
+                    continue
                 if dcf_inputs:
-                    forecast_error = marketscreener_forecast_error(dcf_inputs)
+                    forecast_error = dcf_inputs["extras"]["forecast_context"]["marketscreener_forecast_error"]
                     if forecast_error:
-                        category = _forecast_error_category(forecast_error)
+                        category = next(
+                            (
+                                marker
+                                for marker in (
+                                    "MarketScreener has no analyst forecast page",
+                                    "MarketScreener redirected forecast request",
+                                    "MarketScreener forecast page missing income statement section",
+                                    "MarketScreener anti-bot page returned",
+                                )
+                                if marker in forecast_error
+                            ),
+                            forecast_error.split(":", 1)[0],
+                        )
                         marketscreener_forecast_failures[category] += 1
-                        marketscreener_forecast_failure_samples.setdefault(category, [])
-                        if len(marketscreener_forecast_failure_samples[category]) < 5:
-                            marketscreener_forecast_failure_samples[category].append(ticker)
+                        samples = marketscreener_forecast_failure_samples.setdefault(category, [])
+                        if len(samples) < 5:
+                            samples.append(ticker)
                     else:
                         dcf_records.append((ticker, dcf_inputs))
                 if yahoo_profile:
@@ -176,14 +185,14 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
                 if yahoo_overview:
                     yahoo_overviews[yahoo_overview["Ticker"]] = yahoo_overview
                 if not success:
-                    if failure_reason and failure_reason.startswith("skipped:"):
-                        skipped_counts[failure_reason] = skipped_counts.get(failure_reason, 0) + 1
+                    if failure_reason.startswith("skipped:"):
+                        skipped_counts[failure_reason] += 1
                     else:
-                        failure_counts[failure_reason] = failure_counts.get(failure_reason, 0) + 1
-                    continue
+                        failure_counts[failure_reason] += 1
 
             while next_batch_to_log <= total_batches and completed_tickers >= (next_batch_to_log - 1) * DCF_MAX_WORKERS:
-                _log_dcf_progress(next_batch_to_log, total_batches, completed_tickers, len(tickers), processing_started)
+                if next_batch_to_log % _DCF_PROGRESS_INTERVAL_BATCHES == 0 or next_batch_to_log == total_batches:
+                    _log_dcf_progress(next_batch_to_log, total_batches, completed_tickers, len(tickers), processing_started)
                 if next_batch_to_log % 25 == 0:
                     log_marketscreener_stats()
                 next_batch_to_log += 1
@@ -212,8 +221,7 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
     if dcf_operations:
         dcf_db.bulk_write(dcf_operations, ordered=False)
 
-    macro_db = client[db_name]["macro"]
-    macro_db.update_one(
+    client[db_name]["macro"].update_one(
         filter={},
         update={
             "$set": {
@@ -227,7 +235,7 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
         },
         upsert=True,
     )
-    overview_records = json.loads(json.dumps(list(yahoo_overviews.values()), cls=CustomEncoder))
+    overview_records = normalize_json(list(yahoo_overviews.values()))
     overview_operations = [UpdateOne({"Ticker": record["Ticker"]}, {"$set": record}, upsert=True) for record in overview_records]
     if overview_operations:
         overview_db.bulk_write(overview_operations, ordered=False)
@@ -248,12 +256,12 @@ def run_market_discovery_scrape(tickers, client, yahoo_snapshots=None, include_s
     for ticker in tickers:
         try:
             snapshot = yahoo_snapshots.get(ticker)
-            record = get_similar_companies(ticker, yahoo_info=snapshot.info if snapshot else None)
+            record = get_similar_companies(ticker, yahoo_info=snapshot.get_info() if snapshot else None)
             if record:
-                similar_records.append(json.loads(json.dumps(record, cls=CustomEncoder)))
-        except Exception:
+                similar_records.append(normalize_json(record))
+        except Exception as e:
             similar_failures += 1
-            logger.debug("Similar companies scrape failed for %s\n%s", ticker, traceback.format_exc())
+            _log_ticker_exception("Similar companies scrape", ticker, e)
     similar_operations = [
         UpdateOne({"Ticker": record["Ticker"]}, {"$set": record, "$unset": {"similar_companies": ""}}, upsert=True)
         for record in similar_records
@@ -269,7 +277,7 @@ def run_market_discovery_scrape(tickers, client, yahoo_snapshots=None, include_s
 
     logger.info("Running sector industry scrape")
     industries = get_sector_industries()
-    industry_records = json.loads(json.dumps(industries, cls=CustomEncoder))
+    industry_records = normalize_json(industries)
     industry_operations = [UpdateOne({"industry_key": record["industry_key"]}, {"$set": record}, upsert=True) for record in industry_records]
     if industry_operations:
         industries_db.bulk_write(industry_operations, ordered=False)
@@ -282,7 +290,12 @@ def run_comps_scrape(tickers, client, cached_yahoo_profiles=None, yahoo_snapshot
     sec_financials_by_ticker = None
     if sec_ttm_future is not None:
         wait_started = time.monotonic()
-        sec_financials_by_ticker = sec_ttm_future.result()
+        try:
+            sec_financials_by_ticker = sec_ttm_future.result()
+        except Exception as e:
+            logger.warning("SEC TTM prefetch failed; continuing comps with Yahoo financials only: %s", e)
+            logger.debug("SEC TTM prefetch failed\n%s", traceback.format_exc())
+            sec_financials_by_ticker = {ticker: {"Ticker": ticker} for ticker in tickers}
         logger.info("SEC TTM prefetch wait during comps: %.1fs", time.monotonic() - wait_started)
     ttm_financials_df = compute_ttm_financials(
         tickers,
@@ -296,9 +309,8 @@ def run_comps_scrape(tickers, client, cached_yahoo_profiles=None, yahoo_snapshot
     for df in [yahoo_df, ttm_financials_df]:
         if df.empty:
             continue
-        records = df.astype(object).where(pd.notna(df), None).reset_index()
-        records = records.rename(columns={"index": "Ticker"})
-        records = json.loads(json.dumps(records.to_dict(orient="records"), cls=CustomEncoder))
+        records = df.astype(object).where(pd.notna(df), None).reset_index(names="Ticker")
+        records = normalize_json(records.to_dict(orient="records"))
         operations.extend(
             UpdateOne(
                 {"Ticker": record["Ticker"]},
@@ -345,14 +357,6 @@ def main():
         logger.info("Full scrape completed in %.1fs", time.monotonic() - started)
 
 
-def _exception_location(exc: Exception) -> str:
-    tb = traceback.extract_tb(exc.__traceback__)
-    if not tb:
-        return type(exc).__name__
-    frame = tb[-1]
-    return f"{type(exc).__name__} at {os.path.relpath(frame.filename)}:{frame.lineno} in {frame.name}"
-
-
 def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_mapper, mature_erp, risk_free_rate, fx_rates, yahoo_snapshot=None, marketscreener_executor=None):
     try:
         dcf_result = run_with_timeout(
@@ -370,18 +374,16 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
             marketscreener_executor,
             cancel_event_kwarg="cancel_event",
         )
-        dcf_inputs = json.dumps(dcf_result["dcf_inputs"], cls=CustomEncoder)
-        dcf_inputs = json.loads(dcf_inputs)
+        dcf_inputs = normalize_json(dcf_result["dcf_inputs"])
         return True, dcf_inputs, dcf_result.get("yahoo_profile"), dcf_result.get("yahoo_overview"), None
     except TimeoutError:
+        logger.warning("DCF scrape timed out for %s", ticker)
         return False, None, None, None, "timeout"
     except MissingFinancialStatements:
-        logger.warning("DCF scrape skipped for %s: missing financial statements", ticker)
+        logger.debug("DCF scrape skipped for %s: missing financial statements", ticker)
         return False, None, None, None, "skipped:missing_financial_statements"
     except Exception as e:
-        failure_reason = _exception_location(e)
-        logger.warning("DCF scrape failed for %s: %s", ticker, failure_reason)
-        logger.debug("DCF scrape failed for %s\n%s", ticker, "".join(traceback.format_exception(type(e), e, e.__traceback__)))
+        failure_reason = _log_ticker_exception("DCF scrape", ticker, e)
         return False, None, None, None, failure_reason
 
 

@@ -1,18 +1,12 @@
 import concurrent.futures
 import logging
 import time
-from dataclasses import dataclass
 
 import pandas as pd
 from yahooquery import Ticker
 
-from scrape.core.config import (
-    YAHOOQUERY_BATCH_SIZE,
-    YAHOOQUERY_BATCH_SLEEP_SECONDS,
-    YAHOOQUERY_FAILURE_COOLDOWN_SECONDS,
-    YAHOOQUERY_MAX_CONSECUTIVE_EMPTY_BATCHES,
-    YAHOOQUERY_MAX_WORKERS,
-)
+from scrape.core.config import YAHOOQUERY_BATCH_SIZE, YAHOOQUERY_MAX_WORKERS
+from scrape.core.policies import YAHOO_SNAPSHOT
 from scrape.sources.yahoo_profiles import normalize_quarterly_statement
 from scrape.sources.yahooquery_adapter import INFO_MODULES, YahooQueryTicker, statement_to_wide_shape
 
@@ -24,27 +18,7 @@ class YahooSnapshotRejected(RuntimeError):
     pass
 
 
-@dataclass
-class YahooSnapshot:
-    ticker: str
-    yahoo_ticker: YahooQueryTicker
-    info: dict
-    quarterly_income_stmt: pd.DataFrame
-    quarterly_balance_sheet: pd.DataFrame
-    quarterly_cashflow: pd.DataFrame
-    income_stmt: pd.DataFrame
-    history: pd.DataFrame
-
-
-def _history_for_symbol(history: pd.DataFrame, yahoo_symbol: str) -> pd.DataFrame:
-    if not isinstance(history, pd.DataFrame) or history.empty or not isinstance(history.index, pd.MultiIndex):
-        return pd.DataFrame()
-    if yahoo_symbol not in history.index.get_level_values(0):
-        return pd.DataFrame()
-    return history.xs(yahoo_symbol, level=0, drop_level=False)
-
-
-def _get_yahoo_snapshot_batch(batch: list[str]) -> dict[str, YahooSnapshot]:
+def _get_yahoo_snapshot_batch(batch: list[str]) -> dict[str, YahooQueryTicker]:
     yahoo_symbols = [ticker.replace(".", "-") for ticker in batch]
     client = Ticker(yahoo_symbols, asynchronous=True, max_workers=YAHOOQUERY_MAX_WORKERS)
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
@@ -62,9 +36,17 @@ def _get_yahoo_snapshot_batch(batch: list[str]) -> dict[str, YahooSnapshot]:
         annual_income = annual_income_future.result()
         history = history_future.result()
 
-    snapshots: dict[str, YahooSnapshot] = {}
+    snapshots: dict[str, YahooQueryTicker] = {}
     for ticker, yahoo_symbol in zip(batch, yahoo_symbols):
         try:
+            symbol_history = pd.DataFrame()
+            if (
+                isinstance(history, pd.DataFrame)
+                and not history.empty
+                and isinstance(history.index, pd.MultiIndex)
+                and yahoo_symbol in history.index.get_level_values(0)
+            ):
+                symbol_history = history.xs(yahoo_symbol, level=0, drop_level=False)
             yahoo_ticker = YahooQueryTicker(
                 ticker,
                 modules=modules.get(yahoo_symbol) or modules.get(ticker),
@@ -76,46 +58,43 @@ def _get_yahoo_snapshot_batch(batch: list[str]) -> dict[str, YahooSnapshot]:
                     statement_to_wide_shape(quarterly_cashflow, "3M", yahoo_symbol)
                 ),
                 income_stmt=statement_to_wide_shape(annual_income, "12M", yahoo_symbol),
-                history=_history_for_symbol(history, yahoo_symbol),
+                history=symbol_history,
             )
-            snapshots[ticker] = YahooSnapshot(
-                ticker=ticker,
-                yahoo_ticker=yahoo_ticker,
-                info=yahoo_ticker.get_info(),
-                quarterly_income_stmt=yahoo_ticker.quarterly_income_stmt,
-                quarterly_balance_sheet=yahoo_ticker.quarterly_balance_sheet,
-                quarterly_cashflow=yahoo_ticker.quarterly_cashflow,
-                income_stmt=yahoo_ticker.income_stmt,
-                history=yahoo_ticker.history(),
-            )
+            yahoo_ticker.get_info()
+            snapshots[ticker] = yahoo_ticker
         except Exception as e:
-            logger.debug("%s yahooquery snapshot skipped: %s", ticker, e)
+            logger.warning("%s yahooquery snapshot skipped: %s", ticker, e)
     return snapshots
 
 
-def get_yahoo_snapshots(tickers: list[str]) -> dict[str, YahooSnapshot]:
-    snapshots: dict[str, YahooSnapshot] = {}
+def _collect_yahoo_snapshot_batch(batch, batch_number, total_batches):
+    try:
+        return _get_yahoo_snapshot_batch(batch)
+    except Exception as e:
+        logger.warning("Yahoo snapshot batch %s of %s failed: %s", batch_number, total_batches, e)
+        return {}
+
+
+def get_yahoo_snapshots(tickers: list[str]) -> dict[str, YahooQueryTicker]:
+    snapshots: dict[str, YahooQueryTicker] = {}
     total_batches = (len(tickers) + YAHOOQUERY_BATCH_SIZE - 1) // YAHOOQUERY_BATCH_SIZE
     consecutive_empty_batches = 0
     for i in range(0, len(tickers), YAHOOQUERY_BATCH_SIZE):
         batch_number = i // YAHOOQUERY_BATCH_SIZE + 1
         batch = tickers[i : i + YAHOOQUERY_BATCH_SIZE]
         batch_started = time.monotonic()
-        batch_snapshots = _get_yahoo_snapshot_batch(batch)
+        batch_snapshots = _collect_yahoo_snapshot_batch(batch, batch_number, total_batches)
         if not batch_snapshots:
             logger.warning(
                 "Yahoo snapshot batch %s of %s returned no snapshots; cooling down for %.1fs before one retry",
                 batch_number,
                 total_batches,
-                YAHOOQUERY_FAILURE_COOLDOWN_SECONDS,
+                YAHOO_SNAPSHOT.failure_cooldown_seconds,
             )
-            time.sleep(YAHOOQUERY_FAILURE_COOLDOWN_SECONDS)
-            batch_snapshots = _get_yahoo_snapshot_batch(batch)
+            time.sleep(YAHOO_SNAPSHOT.failure_cooldown_seconds)
+            batch_snapshots = _collect_yahoo_snapshot_batch(batch, batch_number, total_batches)
         snapshots.update(batch_snapshots)
-        if batch_snapshots:
-            consecutive_empty_batches = 0
-        else:
-            consecutive_empty_batches += 1
+        consecutive_empty_batches = 0 if batch_snapshots else consecutive_empty_batches + 1
         if len(batch_snapshots) != len(batch) or batch_number % _PROGRESS_INTERVAL_BATCHES == 0 or batch_number == total_batches:
             log = logger.warning if len(batch_snapshots) != len(batch) else logger.info
             log(
@@ -127,12 +106,12 @@ def get_yahoo_snapshots(tickers: list[str]) -> dict[str, YahooSnapshot]:
                 len(snapshots),
                 time.monotonic() - batch_started,
             )
-        if consecutive_empty_batches >= YAHOOQUERY_MAX_CONSECUTIVE_EMPTY_BATCHES:
+        if consecutive_empty_batches >= YAHOO_SNAPSHOT.max_consecutive_empty_batches:
             raise YahooSnapshotRejected(
                 f"Yahoo rejected {consecutive_empty_batches} consecutive snapshot batches; stopping before database writes"
             )
         if i + YAHOOQUERY_BATCH_SIZE < len(tickers):
-            time.sleep(YAHOOQUERY_BATCH_SLEEP_SECONDS)
+            time.sleep(YAHOO_SNAPSHOT.batch_sleep_seconds)
 
     missing_count = len(tickers) - len(snapshots)
     if missing_count:

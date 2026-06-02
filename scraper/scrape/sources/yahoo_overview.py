@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -23,39 +23,8 @@ def _records_from_dataframe(df: pd.DataFrame, limit: int | None = None):
     return [{str(k): _clean_value(v) for k, v in record.items()} for record in records]
 
 
-def _dict_from_dataframe(df: pd.DataFrame):
-    if len(df.columns) == 1:
-        value_col = df.columns[0]
-        return {
-            str(index): _clean_value(value)
-            for index, value in df[value_col].items()
-        }
-    return {
-        str(record.get("Breakdown", record.get("index", i))): _clean_value(record.get("Value"))
-        for i, record in enumerate(df.reset_index().to_dict(orient="records"))
-    }
-
-
-def _extract_recommendation_mix(df: pd.DataFrame):
-    records = _records_from_dataframe(df, limit=4)
-    for record in records:
-        if record.get("period") == "0m":
-            return record
-    return None
-
-
-def _extract_earnings_estimates(df: pd.DataFrame):
-    records = _records_from_dataframe(df)
-    by_period = {str(record.get("period")): record for record in records if record.get("period") is not None}
-    return {
-        "currentYear": by_period.get("0y"),
-        "nextYear": by_period.get("+1y"),
-        "currentQuarter": by_period.get("0q"),
-    }
-
-
-def _historical_pe_range(close: pd.Series, ttm_eps: float | None, days: int):
-    if close.empty or not ttm_eps or ttm_eps <= 0:
+def _historical_pe_range(close: pd.Series, ttm_eps: float, days: int):
+    if close.empty:
         return None
     cutoff = pd.Timestamp(datetime.now() - timedelta(days=days))
     period_close = close[close.index >= cutoff]
@@ -73,35 +42,48 @@ def _historical_pe_range(close: pd.Series, ttm_eps: float | None, days: int):
     }
 
 
-def _get_historical_pe(yahoo_ticker, info: dict, current_price: float | None):
-    trailing_pe = info.get("trailingPE")
-    ttm_eps = info.get("epsTrailingTwelveMonths")
-    if (not ttm_eps or ttm_eps <= 0) and trailing_pe and trailing_pe > 0 and current_price:
-        ttm_eps = current_price / trailing_pe
-    if not ttm_eps or ttm_eps <= 0:
-        return {"90Day": None, "1Year": None}
-
-    close = yahooquery_close_series(yahoo_ticker.history(period="1y", interval="1d"))
-    return {
-        "90Day": _historical_pe_range(close, ttm_eps, 90),
-        "1Year": _historical_pe_range(close, ttm_eps, 365),
-    }
-
-
 def build_yahoo_overview(yahoo_ticker, info: dict):
     symbol = info.get("symbol") or yahoo_ticker.ticker
     current_price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
     previous_close = info.get("previousClose")
-    analyst_targets = yahoo_ticker.get_analyst_price_targets() or {}
-    earnings_estimates = _extract_earnings_estimates(yahoo_ticker.get_earnings_estimate())
-    recommendations = _extract_recommendation_mix(yahoo_ticker.get_recommendations_summary())
-    major_holders = _dict_from_dataframe(yahoo_ticker.get_major_holders())
+    analyst_targets = {
+        "low": info.get("targetLowPrice"),
+        "high": info.get("targetHighPrice"),
+        "mean": info.get("targetMeanPrice"),
+        "median": info.get("targetMedianPrice"),
+    }
+    earnings_records = _records_from_dataframe(yahoo_ticker.get_earnings_estimate())
+    earnings_by_period = {
+        str(record["period"]): record
+        for record in earnings_records
+        if record.get("period") is not None
+    }
+    recommendations = next(
+        (
+            record
+            for record in _records_from_dataframe(yahoo_ticker.get_recommendations_summary(), limit=4)
+            if record.get("period") == "0m"
+        ),
+        None,
+    )
+    major_holders = {
+        str(index): _clean_value(value)
+        for index, value in yahoo_ticker.get_major_holders()["Value"].items()
+    }
     insider_roster = _records_from_dataframe(yahoo_ticker.get_insider_roster_holders(), limit=10)
-    target_mean = analyst_targets.get("mean")
-    target_median = analyst_targets.get("median")
-    target_reference = target_median or target_mean
+    target_reference = analyst_targets["median"] or analyst_targets["mean"]
     target_upside = (target_reference / current_price) - 1 if target_reference and current_price else None
-    historical_pe = _get_historical_pe(yahoo_ticker, info, current_price)
+    ttm_eps = info.get("epsTrailingTwelveMonths")
+    trailing_pe = info.get("trailingPE")
+    if (not ttm_eps or ttm_eps <= 0) and trailing_pe and trailing_pe > 0 and current_price:
+        ttm_eps = current_price / trailing_pe
+    historical_pe = {"90Day": None, "1Year": None}
+    if ttm_eps and ttm_eps > 0:
+        close = yahooquery_close_series(yahoo_ticker.history(period="1y", interval="1d"))
+        historical_pe = {
+            "90Day": _historical_pe_range(close, ttm_eps, 90),
+            "1Year": _historical_pe_range(close, ttm_eps, 365),
+        }
 
     return {
         "Ticker": symbol,
@@ -138,7 +120,11 @@ def build_yahoo_overview(yahoo_ticker, info: dict):
             "recommendations": {"current": recommendations},
         },
         "eps": {
-            "estimates": earnings_estimates,
+            "estimates": {
+                "currentYear": earnings_by_period.get("0y"),
+                "nextYear": earnings_by_period.get("+1y"),
+                "currentQuarter": earnings_by_period.get("0q"),
+            },
         },
         "ownership": {
             "insidersPercentHeld": major_holders.get("insidersPercentHeld"),

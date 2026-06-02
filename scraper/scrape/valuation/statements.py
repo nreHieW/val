@@ -24,7 +24,7 @@ def build_fiscal_bridge_context(info: dict, quarterly_income_statement: pd.DataF
         return None
 
     last_fiscal_year_end = parse_timestamp(info.get("lastFiscalYearEnd"))
-    if last_fiscal_year_end is None:
+    if pd.isna(last_fiscal_year_end):
         return None
 
     revenue_series = get_statement_metric_series(

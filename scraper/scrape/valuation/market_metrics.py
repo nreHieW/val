@@ -16,10 +16,11 @@ def get_exchange_rates():
         if currency == "USD":
             fx_rates[currency] = 1.0
             continue
-        history = YahooQueryTicker(currency + "USD=X").history(period="5d")
+        yahoo_pair = currency + "USD=X"
+        history = YahooQueryTicker(yahoo_pair).history(period="5d")
         close = yahooquery_close_series(history)
         if close.empty:
-            logger.warning("Missing FX rate for %s via Yahoo Finance", currency + "USD=X")
+            logger.warning("Missing FX rate for %s via Yahoo Finance", yahoo_pair)
             fx_rates[currency] = 1.0
         else:
             fx_rates[currency] = close.iloc[-1].item()
@@ -27,8 +28,8 @@ def get_exchange_rates():
 
 
 def get_regional_crps(revenues_by_region: dict, mapper: StringMapper, country_erps: dict):
-    regions = list(revenues_by_region.keys())
-    indices_to_adjust = [i for i in range(len(mapper.gts) - 10, len(mapper.gts))]
+    regions = list(revenues_by_region)
+    indices_to_adjust = list(range(len(mapper.gts) - 10, len(mapper.gts)))
     mappings = [mapper.get_closest_with_scores(x, indices_to_adjust=indices_to_adjust) for x in regions]
 
     flattened_mappings = [(region, gt, score) for region, mapping in zip(regions, mappings) if mapping for gt, score in mapping]
@@ -41,8 +42,7 @@ def get_regional_crps(revenues_by_region: dict, mapper: StringMapper, country_er
             final_mappings[region] = gt
             used_gts.add(gt)
     for region in regions:
-        if region not in final_mappings:
-            final_mappings[region] = "Global"
+        final_mappings.setdefault(region, "Global")
     crps = [country_erps.get(final_mappings[region], country_erps.get("Global", 0)) for region in regions]
     total_revenues = sum(revenues_by_region.values())
     weights = [revenues_by_region[region] / total_revenues for region in regions] if total_revenues else [1 / len(regions)] * len(regions)
@@ -53,8 +53,7 @@ def get_industry_beta(industry: str, sector: str, mapper: StringMapper, industry
     industry_result, industry_score = mapper.get_closest_with_scores(industry)[0]
     sector_result, sector_score = mapper.get_closest_with_scores(sector)[0]
     if industry_score is None and sector_score is None:
-        industry_result = "Grand Total"
-        return industry_betas[industry_result], industry_result
+        return industry_betas["Grand Total"], "Grand Total"
 
     if industry_score > sector_score:
         return industry_betas[industry_result], industry_result
@@ -63,10 +62,8 @@ def get_industry_beta(industry: str, sector: str, mapper: StringMapper, industry
 
 def get_10year_tbill():
     url = "https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol?symbols=US10Y&requestMethod=itv&noform=1&partnerId=2&fund=1&exthrs=1&output=json&events=1"
-    res = request_get(url, timeout=REQUEST_TIMEOUT_SECONDS).json()
-    raw = res["FormattedQuoteResult"]["FormattedQuote"][0]["last"]
-    res = raw.replace("%", "")
-    return float(res) / 100
+    raw = request_get(url, timeout=REQUEST_TIMEOUT_SECONDS).json()["FormattedQuoteResult"]["FormattedQuote"][0]["last"]
+    return float(raw.replace("%", "")) / 100
 
 
 def get_mature_erp():

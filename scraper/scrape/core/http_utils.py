@@ -38,9 +38,6 @@ def request_get(url, **kwargs):
 
 
 def browser_get(url, **kwargs):
-    request_headers = kwargs.pop("headers", None)
-    if request_headers is not None:
-        kwargs["headers"] = request_headers
     return _browser_session().get(
         url,
         impersonate=kwargs.pop("impersonate", "chrome124"),

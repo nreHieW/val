@@ -54,7 +54,8 @@ def _yahoo_call(label, fn, retry_none=False):
         except Exception as e:
             logger.warning("%s skipped: %s", label, e)
             return None
-        time.sleep(YAHOO.retry.backoff_seconds * (attempt + 1))
+        if attempt < YAHOO.retry.attempts - 1:
+            time.sleep(YAHOO.retry.backoff(attempt))
     logger.warning("%s skipped: no data after %s attempts", label, YAHOO.retry.attempts)
     return None
 
@@ -82,14 +83,6 @@ def get_similar_companies(source, yahoo_info=None):
     }
 
 
-def _performance_percent(closes, days):
-    if len(closes) < 2:
-        return None
-    end_date = closes.index[-1]
-    start = closes[closes.index >= end_date - timedelta(days=days)].iloc[0]
-    return float((closes.iloc[-1] / start - 1) * 100)
-
-
 def _industry_performance(symbol):
     empty = {name: None for name in [*PERFORMANCE_PERIODS, "ytd"]}
     history = _yahoo_call(
@@ -104,7 +97,11 @@ def _industry_performance(symbol):
         logger.warning("%s industry performance unavailable: fewer than two closing prices", symbol)
         return empty
 
-    performance = {name: _performance_percent(closes, days) for name, days in PERFORMANCE_PERIODS.items()}
+    end_date = closes.index[-1]
+    performance = {
+        name: float((closes.iloc[-1] / closes[closes.index >= end_date - timedelta(days=days)].iloc[0] - 1) * 100)
+        for name, days in PERFORMANCE_PERIODS.items()
+    }
     ytd = closes[closes.index.year == closes.index[-1].year]
     performance["ytd"] = None if len(ytd) < 2 else float((ytd.iloc[-1] / ytd.iloc[0] - 1) * 100)
     return performance

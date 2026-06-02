@@ -2,6 +2,7 @@ import csv
 import re
 from io import StringIO
 
+from scrape.core.config import REQUEST_TIMEOUT_SECONDS
 from scrape.core.http_utils import request_get
 
 _NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
@@ -49,7 +50,7 @@ _OPERATING_TRUST_PATTERN = re.compile(
 
 
 def _read_pipe_table(url):
-    response = request_get(url, timeout=30)
+    response = request_get(url, timeout=REQUEST_TIMEOUT_SECONDS)
     response.raise_for_status()
     lines = [line for line in response.text.splitlines() if line and not line.startswith("File Creation Time:")]
     return csv.DictReader(StringIO("\n".join(lines)), delimiter="|")

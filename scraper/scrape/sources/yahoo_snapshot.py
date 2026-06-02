@@ -5,10 +5,7 @@ import time
 import pandas as pd
 from yahooquery import Ticker
 
-from scrape.core.config import (
-    YAHOOQUERY_BATCH_SIZE,
-    YAHOOQUERY_MAX_WORKERS,
-)
+from scrape.core.config import YAHOOQUERY_BATCH_SIZE, YAHOOQUERY_MAX_WORKERS
 from scrape.core.policies import YAHOO_SNAPSHOT
 from scrape.sources.yahoo_profiles import normalize_quarterly_statement
 from scrape.sources.yahooquery_adapter import INFO_MODULES, YahooQueryTicker, statement_to_wide_shape
@@ -97,10 +94,7 @@ def get_yahoo_snapshots(tickers: list[str]) -> dict[str, YahooQueryTicker]:
             time.sleep(YAHOO_SNAPSHOT.failure_cooldown_seconds)
             batch_snapshots = _collect_yahoo_snapshot_batch(batch, batch_number, total_batches)
         snapshots.update(batch_snapshots)
-        if batch_snapshots:
-            consecutive_empty_batches = 0
-        else:
-            consecutive_empty_batches += 1
+        consecutive_empty_batches = 0 if batch_snapshots else consecutive_empty_batches + 1
         if len(batch_snapshots) != len(batch) or batch_number % _PROGRESS_INTERVAL_BATCHES == 0 or batch_number == total_batches:
             log = logger.warning if len(batch_snapshots) != len(batch) else logger.info
             log(

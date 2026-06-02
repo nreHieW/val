@@ -92,8 +92,6 @@ def days_between(start, end):
 
 
 def _sec_get_json(url):
-    if SEC.retry.attempts < 1:
-        raise ValueError("SEC retries must be positive")
     for attempt in range(SEC.retry.attempts):
         _sec_limiter.wait()
         response = _sec_session.get(url, headers=SEC_HEADERS, timeout=REQUEST_TIMEOUT_SECONDS)
@@ -106,9 +104,9 @@ def _sec_get_json(url):
 
         retry_after = response.headers.get("Retry-After")
         try:
-            sleep_seconds = float(retry_after) if retry_after else SEC.retry.backoff_seconds * (attempt + 1)
+            sleep_seconds = float(retry_after) if retry_after else SEC.retry.backoff(attempt)
         except ValueError:
-            sleep_seconds = SEC.retry.backoff_seconds * (attempt + 1)
+            sleep_seconds = SEC.retry.backoff(attempt)
         logger.info("SEC rate limited; retrying in %.1fs", sleep_seconds)
         time.sleep(sleep_seconds)
 

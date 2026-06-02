@@ -154,8 +154,6 @@ def get_marketscreener_url(ticker, name: str = "", cancel_event=None):
 
 
 def _marketscreener_get(url, cancel_event=None, validator=None):
-    if MARKETSCREENER.retry.attempts < 1:
-        raise ValueError("MarketScreener retries must be positive")
     for attempt in range(MARKETSCREENER.retry.attempts):
         try:
             raise_if_cancelled(cancel_event, _CANCELLED)
@@ -193,8 +191,7 @@ def _marketscreener_get(url, cancel_event=None, validator=None):
                 raise
             _increment_stat("retries")
             reset_browser_session()
-            seconds = MARKETSCREENER.retry.backoff_seconds * (attempt + 1)
-            sleep_with_cancel(seconds, cancel_event, _CANCELLED)
+            sleep_with_cancel(MARKETSCREENER.retry.backoff(attempt), cancel_event, _CANCELLED)
 
 
 def _marketscreener_number(value):

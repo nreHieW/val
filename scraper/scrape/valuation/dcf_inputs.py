@@ -158,8 +158,7 @@ def _future_result(future, cancel_event):
         try:
             return future.result(timeout=0.5)
         except concurrent.futures.TimeoutError:
-            if future.done():
-                return future.result()
+            continue
 
 
 def _with_yahoo_retries(label, func, *, financial_endpoint: bool = False, cancel_event=None):
@@ -175,7 +174,7 @@ def _with_yahoo_retries(label, func, *, financial_endpoint: bool = False, cancel
         except Exception as exc:
             if attempt == YAHOO.retry.attempts - 1 or not _is_transient_yahoo_error(exc):
                 raise
-            sleep_seconds = YAHOO.retry.backoff_seconds * (attempt + 1) + random.uniform(0, 0.75)
+            sleep_seconds = YAHOO.retry.backoff(attempt) + random.uniform(0, 0.75)
             logger.debug("%s Yahoo failure (%s); retrying in %.1fs", label, exc, sleep_seconds)
             sleep_with_cancel(sleep_seconds, cancel_event, _CANCELLED)
 
@@ -191,7 +190,8 @@ def _usd_fx_rate(currency: str | None, fx_rates: dict, cancel_event=None) -> flo
     if not currency:
         return 1.0
 
-    currency = _CURRENCY_ALIASES.get(str(currency).strip().upper(), str(currency).strip().upper())
+    currency = str(currency).strip().upper()
+    currency = _CURRENCY_ALIASES.get(currency, currency)
     if currency == "USD":
         return 1.0
 
@@ -231,7 +231,7 @@ def _income_statement_for_dcf(ticker: YahooQueryTicker, cancel_event=None) -> pd
             return quarterly
 
         if attempt < YAHOO.retry.attempts - 1:
-            sleep_seconds = YAHOO.retry.backoff_seconds * (attempt + 1) + random.uniform(0, 0.75)
+            sleep_seconds = YAHOO.retry.backoff(attempt) + random.uniform(0, 0.75)
             logger.debug("%s quarterly income statement empty; retrying in %.1fs", symbol, sleep_seconds)
             sleep_with_cancel(sleep_seconds, cancel_event, _CANCELLED)
 
@@ -321,19 +321,18 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     cross_holdings_and_other_non_operating_assets = _balance_sheet_scalar(
         last_balance_sheet, "Investments And Advances"
     )
-    minority_interest = _balance_sheet_scalar(last_balance_sheet, "Minority Interest")  # by right. should convert to market value
+    minority_interest = _balance_sheet_scalar(last_balance_sheet, "Minority Interest")
     number_of_shares_outstanding = info.get("sharesOutstanding", 0)
     curr_price = info.get("previousClose", 0)
     pretax_income_total = pretax_income_series.sum()
     effective_tax_rate = (tax_rate_series * pretax_income_series).sum() / pretax_income_total if pretax_income_total else 0
 
     country = info.get("country")
-    regions = region_mapper.get_closest(country) if country else ["Global"]
+    region = region_mapper.get_closest(country)[0] if country else "Global"
 
     industry = info.get("industry") or info.get("sector") or "Grand Total"
     sector = info.get("sector") or industry
-    avg_betas = avg_metrics["Unlevered Beta"]
-    unlevered_beta, industry = get_industry_beta(industry, sector, industry_mapper, avg_betas)
+    unlevered_beta, industry = get_industry_beta(industry, sector, industry_mapper, avg_metrics["Unlevered Beta"])
     raise_if_cancelled(cancel_event, _CANCELLED)
     marketscreener_url = get_marketscreener_url(symbol, info.get("shortName") or info.get("longName") or "", cancel_event)
     raise_if_cancelled(cancel_event, _CANCELLED)
@@ -372,9 +371,9 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
             executor.shutdown()
 
     equity_risk_premium, mapped_regional_revenues = get_regional_crps(regional_revenues, region_mapper, country_erps)
-    equity_risk_premium = equity_risk_premium + mature_erp
+    equity_risk_premium += mature_erp
     _, company_spread, prob_of_failure = synthetic_rating(info.get("marketCap", 0), operating_income_ttm, interest_expense)
-    pre_tax_cost_of_debt = risk_free_rate + company_spread + country_erps.get(regions[0], country_erps.get("Global", 0))
+    pre_tax_cost_of_debt = risk_free_rate + company_spread + country_erps.get(region, country_erps.get("Global", 0))
 
     target_pre_tax_operating_margin = avg_metrics["Pre-tax Operating Margin (Unadjusted)"].get(industry, 0)
 
@@ -411,14 +410,13 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
             revenue_growth_rate_next_year = bridged_ntm_revenue / revenues - 1
         rolling_ntm_revenues = build_rolling_ntm_revenue_path(consensus_revenues_usd, fiscal_bridge_context)
     else:
-        curr_year = datetime.datetime.now().year - 1
-        next_fiscal_year = str(curr_year + 2)
+        next_fiscal_year = str(datetime.datetime.now().year + 1)
         next_fiscal_year_consensus = consensus_revenues_usd.get(next_fiscal_year)
         if next_fiscal_year_consensus and revenues:
             revenue_growth_rate_next_year = next_fiscal_year_consensus / revenues - 1
 
     post_bridge_years = sorted(
-        [year for year in consensus_revenues_usd.keys() if int(year) >= int(next_fiscal_year)],
+        [year for year in consensus_revenues_usd if int(year) >= int(next_fiscal_year)],
         key=int,
     )
     post_bridge_growth_rates = []
@@ -456,8 +454,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     year_of_convergence_for_margin = 5
     years_of_high_growth = 5
     invested_capital = book_value_of_equity + book_value_of_debt - cash_and_marketable_securities - cross_holdings_and_other_non_operating_assets
-    curr_sales_to_capital_ratio = revenues / invested_capital if invested_capital else avg_metrics["Sales/Capital"].get(industry, 1)
-    sales_to_capital_ratio_early = curr_sales_to_capital_ratio
+    sales_to_capital_ratio_early = revenues / invested_capital if invested_capital else avg_metrics["Sales/Capital"].get(industry, 1)
     sales_to_capital_ratio_steady = avg_metrics["Sales/Capital"].get(industry, 1)
     try:
         annual_income_stmt = yahoo_snapshot.income_stmt if yahoo_snapshot is not None else pd.DataFrame()

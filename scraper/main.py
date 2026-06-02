@@ -93,8 +93,7 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
     country_erps = get_country_erp()
     region_mapper = StringMapper(list(country_erps.keys()))
     avg_metrics = get_industry_avgs()
-    avg_betas = avg_metrics["Unlevered Beta"]
-    industry_mapper = StringMapper(list(avg_betas.keys()))
+    industry_mapper = StringMapper(list(avg_metrics["Unlevered Beta"]))
     risk_free_rate = get_10year_tbill()
     mature_erp = get_mature_erp()
     fx_rates = get_exchange_rates()
@@ -119,7 +118,7 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
             try:
                 ticker = next(ticker_iter)
             except StopIteration:
-                return False
+                return
             futures[
                 executor.submit(
                     process_ticker,
@@ -135,7 +134,6 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
                     marketscreener_executor,
                 )
             ] = ticker
-            return True
 
         for _ in range(min(DCF_MAX_WORKERS, len(tickers))):
             submit_next_ticker()
@@ -149,8 +147,7 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
         while futures:
             completed, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
             for future in completed:
-                ticker = futures[future]
-                del futures[future]
+                ticker = futures.pop(future)
                 completed_tickers += 1
                 submit_next_ticker()
                 try:
@@ -190,7 +187,6 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
                         skipped_counts[failure_reason] += 1
                     else:
                         failure_counts[failure_reason] += 1
-                    continue
 
             while next_batch_to_log <= total_batches and completed_tickers >= (next_batch_to_log - 1) * DCF_MAX_WORKERS:
                 _log_dcf_progress(next_batch_to_log, total_batches, completed_tickers, len(tickers), processing_started)
@@ -222,8 +218,7 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
     if dcf_operations:
         dcf_db.bulk_write(dcf_operations, ordered=False)
 
-    macro_db = client[db_name]["macro"]
-    macro_db.update_one(
+    client[db_name]["macro"].update_one(
         filter={},
         update={
             "$set": {

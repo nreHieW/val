@@ -1,7 +1,10 @@
+import logging
 import re
+
 import pandas as pd
 from yahooquery import Ticker
 
+logger = logging.getLogger(__name__)
 
 INFO_MODULES = [
     "summaryProfile",
@@ -16,17 +19,6 @@ INFO_MODULES = [
     "insiderHolders",
 ]
 _METADATA_COLUMNS = {"asOfDate", "periodType", "currencyCode"}
-_TARGET_KEYS = {
-    "low": "targetLowPrice",
-    "high": "targetHighPrice",
-    "mean": "targetMeanPrice",
-    "median": "targetMedianPrice",
-}
-
-
-def _humanize_field(name: str) -> str:
-    name = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name)
-    return re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", name)
 
 
 def statement_to_wide_shape(df: pd.DataFrame, period_type: str, yahoo_symbol: str | None = None) -> pd.DataFrame:
@@ -47,7 +39,13 @@ def statement_to_wide_shape(df: pd.DataFrame, period_type: str, yahoo_symbol: st
     statement = statement.sort_values("asOfDate", ascending=False).drop_duplicates("asOfDate")
     statement = statement.set_index("asOfDate")
     value_columns = [column for column in statement.columns if column not in _METADATA_COLUMNS]
-    statement = statement[value_columns].rename(columns=_humanize_field)
+    statement = statement[value_columns].rename(
+        columns=lambda name: re.sub(
+            r"(?<=[A-Z])(?=[A-Z][a-z])",
+            " ",
+            re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name),
+        )
+    )
     return statement.T
 
 
@@ -165,11 +163,8 @@ class YahooQueryTicker:
         except KeyError as e:
             if str(e).strip("'") != self.yahoo_symbol:
                 raise
+            logger.warning("%s Yahoo history unavailable; using empty history", self.ticker)
             return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "adjclose"])
-
-    def get_analyst_price_targets(self) -> dict:
-        info = self.get_info()
-        return {key: info.get(source_key) for key, source_key in _TARGET_KEYS.items()}
 
     def get_earnings_estimate(self) -> pd.DataFrame:
         if self._modules is not None:

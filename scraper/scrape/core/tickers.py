@@ -72,24 +72,15 @@ def _is_common_operating_stock(symbol, name, etf, test_issue):
 
 def get_all_tickers():
     tickers = []
-    for row in _read_pipe_table(_NASDAQ_LISTED_URL):
-        symbol = row.get("Symbol", "").strip()
-        if _is_common_operating_stock(
-            symbol,
-            row.get("Security Name", ""),
-            row.get("ETF", ""),
-            row.get("Test Issue", ""),
-        ):
-            tickers.append(symbol)
-
-    for row in _read_pipe_table(_OTHER_LISTED_URL):
-        symbol = row.get("ACT Symbol", "").strip()
-        if _is_common_operating_stock(
-            symbol,
-            row.get("Security Name", ""),
-            row.get("ETF", ""),
-            row.get("Test Issue", ""),
-        ):
-            tickers.append(symbol)
+    for url, symbol_column in ((_NASDAQ_LISTED_URL, "Symbol"), (_OTHER_LISTED_URL, "ACT Symbol")):
+        for row in _read_pipe_table(url):
+            symbol = row.get(symbol_column, "").strip()
+            if _is_common_operating_stock(
+                symbol,
+                row.get("Security Name", ""),
+                row.get("ETF", ""),
+                row.get("Test Issue", ""),
+            ):
+                tickers.append(symbol)
 
     return sorted(set(tickers))

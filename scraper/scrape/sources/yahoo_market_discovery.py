@@ -6,7 +6,7 @@ import yfinance as yf
 from yfinance import EquityQuery, screen
 from yfinance.exceptions import YFRateLimitError
 
-from scrape.core.config import YAHOO_INFO_RETRIES, YAHOO_INFO_RETRY_SLEEP_SECONDS
+from scrape.core.policies import YAHOO
 from scrape.core.rate_limit import yahoo_call
 from scrape.sources.yahoo_profiles import get_yahoo_info
 from scrape.sources.yahooquery_adapter import YahooQueryTicker, yahooquery_close_series
@@ -39,19 +39,23 @@ SIMILAR_COMPANY_SCREEN_SIZE = 250
 
 
 def _yahoo_call(label, fn, retry_none=False):
-    for attempt in range(YAHOO_INFO_RETRIES):
+    for attempt in range(YAHOO.retry.attempts):
         try:
             result = yahoo_call(fn, retries=1)
-            if result is not None or not retry_none:
+            if result is not None:
                 return result
+            if not retry_none:
+                logger.warning("%s skipped: Yahoo returned no data", label)
+                return None
         except YFRateLimitError:
-            if attempt == YAHOO_INFO_RETRIES - 1:
-                logger.debug("%s skipped: Yahoo rate limited after %s attempts", label, YAHOO_INFO_RETRIES)
+            if attempt == YAHOO.retry.attempts - 1:
+                logger.warning("%s skipped: Yahoo rate limited after %s attempts", label, YAHOO.retry.attempts)
                 return None
         except Exception as e:
-            logger.debug("%s skipped: %s", label, e)
+            logger.warning("%s skipped: %s", label, e)
             return None
-        time.sleep(YAHOO_INFO_RETRY_SLEEP_SECONDS * (attempt + 1))
+        time.sleep(YAHOO.retry.backoff_seconds * (attempt + 1))
+    logger.warning("%s skipped: no data after %s attempts", label, YAHOO.retry.attempts)
     return None
 
 
@@ -97,6 +101,7 @@ def _industry_performance(symbol):
 
     closes = yahooquery_close_series(history)
     if len(closes) < 2:
+        logger.warning("%s industry performance unavailable: fewer than two closing prices", symbol)
         return empty
 
     performance = {name: _performance_percent(closes, days) for name, days in PERFORMANCE_PERIODS.items()}

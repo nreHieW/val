@@ -6,6 +6,7 @@ from functools import lru_cache
 import requests
 
 from scrape.core.config import REQUEST_TIMEOUT_SECONDS, SEC_USER_AGENT
+from scrape.core.policies import SEC
 from scrape.core.rate_limit import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -75,12 +76,7 @@ FACT_SPECS = {
 }
 
 MAX_FACT_AGE_DAYS = 540
-SEC_REQUEST_MIN_INTERVAL_SECONDS = 1.0
-SEC_REQUEST_JITTER_SECONDS = 0.25
-SEC_RETRIES = 6
-SEC_RETRY_SLEEP_SECONDS = 30
-
-_sec_limiter = RateLimiter(SEC_REQUEST_MIN_INTERVAL_SECONDS, SEC_REQUEST_JITTER_SECONDS)
+_sec_limiter = RateLimiter(SEC.rate_limit.min_interval_seconds, SEC.rate_limit.jitter_seconds)
 _sec_session = requests.Session()
 
 
@@ -96,25 +92,25 @@ def days_between(start, end):
 
 
 def _sec_get_json(url):
-    for attempt in range(SEC_RETRIES):
+    if SEC.retry.attempts < 1:
+        raise ValueError("SEC retries must be positive")
+    for attempt in range(SEC.retry.attempts):
         _sec_limiter.wait()
         response = _sec_session.get(url, headers=SEC_HEADERS, timeout=REQUEST_TIMEOUT_SECONDS)
         if response.status_code != 429:
             response.raise_for_status()
             return response.json()
 
-        if attempt == SEC_RETRIES - 1:
-            raise SecRateLimited(f"SEC 429 after {SEC_RETRIES} attempts for {response.url}")
+        if attempt == SEC.retry.attempts - 1:
+            raise SecRateLimited(f"SEC 429 after {SEC.retry.attempts} attempts for {response.url}")
 
         retry_after = response.headers.get("Retry-After")
         try:
-            sleep_seconds = float(retry_after) if retry_after else SEC_RETRY_SLEEP_SECONDS * (attempt + 1)
+            sleep_seconds = float(retry_after) if retry_after else SEC.retry.backoff_seconds * (attempt + 1)
         except ValueError:
-            sleep_seconds = SEC_RETRY_SLEEP_SECONDS * (attempt + 1)
+            sleep_seconds = SEC.retry.backoff_seconds * (attempt + 1)
         logger.info("SEC rate limited; retrying in %.1fs", sleep_seconds)
-        time.sleep(max(0.0, sleep_seconds))
-
-    raise SecRateLimited(f"SEC 429 after {SEC_RETRIES} attempts for {url}")
+        time.sleep(sleep_seconds)
 
 
 @lru_cache(maxsize=1)
@@ -206,14 +202,12 @@ def quarterly_values(companyfacts, spec):
                 continue
             age_days = days_between(quarters[0].get("end"), date.today().isoformat())
             if age_days is not None and age_days <= MAX_FACT_AGE_DAYS:
-                candidates.append(((taxonomy, tag), quarters))
+                candidates.append((tag, quarters))
 
-    preferred = [candidate for candidate in candidates if candidate[0][1] in preferred_tags]
-    candidates = preferred or [candidate for candidate in candidates if candidate[0][1] not in preferred_tags]
+    candidates = [candidate for candidate in candidates if candidate[0] in preferred_tags] or candidates
     if not candidates:
         return []
-    _tag, quarters = max(candidates, key=lambda candidate: (candidate[1][0]["end"], len(candidate[1])))
-    return quarters
+    return max(candidates, key=lambda candidate: (candidate[1][0]["end"], len(candidate[1])))[1]
 
 
 def latest_and_previous_ttm(companyfacts, spec):
@@ -238,12 +232,12 @@ def get_sec_ttm_financials(ticker):
     }
 
     for prefix in ["Net Income", "EBIT"]:
-        latest, previous, _quarters = latest_and_previous_ttm(companyfacts, FACT_SPECS[prefix])
+        latest, previous, _ = latest_and_previous_ttm(companyfacts, FACT_SPECS[prefix])
         result[f"{prefix} TTM"] = latest
         result[f"{prefix} Prev TTM"] = previous
 
-    ebitda_ttm, ebitda_prev_ttm, _quarters = latest_and_previous_ttm(companyfacts, FACT_SPECS["EBITDA"])
-    depreciation_ttm, depreciation_prev_ttm, _quarters = latest_and_previous_ttm(
+    ebitda_ttm, ebitda_prev_ttm, _ = latest_and_previous_ttm(companyfacts, FACT_SPECS["EBITDA"])
+    depreciation_ttm, depreciation_prev_ttm, _ = latest_and_previous_ttm(
         companyfacts, FACT_SPECS["Depreciation & Amortization"]
     )
     result["EBITDA TTM"] = ebitda_ttm

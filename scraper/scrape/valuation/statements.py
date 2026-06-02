@@ -47,8 +47,6 @@ def build_fiscal_bridge_context(info: dict, quarterly_income_statement: pd.DataF
         }
         for column in quarterly_income_statement.columns
     ]
-    if not quarter_rows:
-        return None
 
     quarters = pd.DataFrame(quarter_rows).sort_values("quarter_end", ascending=False).reset_index(drop=True)
     current_fiscal_year_end = last_fiscal_year_end + pd.DateOffset(years=1)

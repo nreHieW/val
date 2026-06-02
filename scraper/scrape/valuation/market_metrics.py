@@ -2,7 +2,7 @@ import logging
 
 import pandas as pd
 
-from scrape.core.config import CURRENCIES, REQUEST_TIMEOUT_SECONDS, headers
+from scrape.core.config import CURRENCIES, REQUEST_TIMEOUT_SECONDS
 from scrape.core.http_utils import request_get
 from scrape.sources.yahooquery_adapter import YahooQueryTicker, yahooquery_close_series
 from scrape.valuation.string_mapper import StringMapper
@@ -11,19 +11,19 @@ logger = logging.getLogger(__name__)
 
 
 def get_exchange_rates():
-    fx_rate = {}
+    fx_rates = {}
     for currency in CURRENCIES:
         if currency == "USD":
-            fx_rate[currency] = 1.0
+            fx_rates[currency] = 1.0
             continue
         history = YahooQueryTicker(currency + "USD=X").history(period="5d")
         close = yahooquery_close_series(history)
         if close.empty:
             logger.warning("Missing FX rate for %s via Yahoo Finance", currency + "USD=X")
-            fx_rate[currency] = 1.0
+            fx_rates[currency] = 1.0
         else:
-            fx_rate[currency] = close.iloc[-1].item()
-    return fx_rate
+            fx_rates[currency] = close.iloc[-1].item()
+    return fx_rates
 
 
 def get_regional_crps(revenues_by_region: dict, mapper: StringMapper, country_erps: dict):
@@ -46,25 +46,24 @@ def get_regional_crps(revenues_by_region: dict, mapper: StringMapper, country_er
     crps = [country_erps.get(final_mappings[region], country_erps.get("Global", 0)) for region in regions]
     total_revenues = sum(revenues_by_region.values())
     weights = [revenues_by_region[region] / total_revenues for region in regions] if total_revenues else [1 / len(regions)] * len(regions)
-    return sum([x * y for x, y in zip(crps, weights)]), {final_mappings[region]: v for region, v in revenues_by_region.items()}
+    return sum(x * y for x, y in zip(crps, weights)), {final_mappings[region]: v for region, v in revenues_by_region.items()}
 
 
 def get_industry_beta(industry: str, sector: str, mapper: StringMapper, industry_betas: dict):
     industry_result, industry_score = mapper.get_closest_with_scores(industry)[0]
     sector_result, sector_score = mapper.get_closest_with_scores(sector)[0]
-    if (industry_score is None) and (sector_score is None):
+    if industry_score is None and sector_score is None:
         industry_result = "Grand Total"
         return industry_betas[industry_result], industry_result
 
     if industry_score > sector_score:
         return industry_betas[industry_result], industry_result
-    else:
-        return industry_betas[sector_result], sector_result
+    return industry_betas[sector_result], sector_result
 
 
 def get_10year_tbill():
     url = "https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol?symbols=US10Y&requestMethod=itv&noform=1&partnerId=2&fund=1&exthrs=1&output=json&events=1"
-    res = request_get(url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS).json()
+    res = request_get(url, timeout=REQUEST_TIMEOUT_SECONDS).json()
     raw = res["FormattedQuoteResult"]["FormattedQuote"][0]["last"]
     res = raw.replace("%", "")
     return float(res) / 100
@@ -113,15 +112,15 @@ def synthetic_rating(market_cap, operating_income, interest_expense):
         ]
 
     if interest_expense <= 0:
-        interest_coverage_rato = 100000
+        interest_coverage_ratio = 100000
     elif operating_income <= 0:
-        interest_coverage_rato = -100000
+        interest_coverage_ratio = -100000
     else:
-        interest_coverage_rato = operating_income / interest_expense
+        interest_coverage_ratio = operating_income / interest_expense
 
     rating, spread = "D", "20.00%"
     for low, high, r, s in rating_mapping:
-        if low <= interest_coverage_rato <= high:
+        if low <= interest_coverage_ratio <= high:
             rating, spread = r, s
             break
     if operating_income < 0:

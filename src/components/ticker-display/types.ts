@@ -9,6 +9,7 @@ export type UserDCFInputs = {
   target_pre_tax_operating_margin: number;
   year_of_convergence_for_margin: number;
   discount_rate: number;
+  revenue_growth_rates?: number[];
   years_of_high_growth: number;
   sales_to_capital_ratio_early: number;
   sales_to_capital_ratio_steady: number;
@@ -65,6 +66,7 @@ export type DCFInputData = {
   sales_to_capital_ratio_steady: number;
   r_and_d_expenses: number[];
   discount_rate: number;
+  revenue_growth_rates?: number[];
 };
 
 export type TickerOverview = {

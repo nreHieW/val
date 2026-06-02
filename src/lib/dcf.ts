@@ -45,6 +45,7 @@ export type DcfInput = {
   sales_to_capital_ratio_steady: number;
   r_and_d_expenses: number[];
   discount_rate?: number | null;
+  revenue_growth_rates?: number[] | null;
 };
 
 export type DcfRow = {
@@ -234,7 +235,7 @@ export function dcf(input: DcfInput): DcfOutput {
     value_of_research_asset = research_asset;
   }
 
-  const revenue_growth_rates = [
+  const defaultRevenueGrowthRates = [
     0,
     input.revenue_growth_rate_next_year,
     ...Array(Math.max(input.years_of_high_growth - 2, 0)).fill(
@@ -247,6 +248,7 @@ export function dcf(input: DcfInput): DcfOutput {
     ),
     risk_free_rate,
   ];
+  const revenue_growth_rates = input.revenue_growth_rates ?? defaultRevenueGrowthRates;
 
   const revenues_factors = revenue_growth_rates.map((x) => 1 + x);
   const projected_revenues = cumprod(revenues_factors).map((x) => x * revenues);

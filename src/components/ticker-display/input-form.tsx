@@ -1,4 +1,5 @@
 "use client";
+import { useEffect, useMemo } from "react";
 import {
   Accordion,
   AccordionContent,
@@ -30,6 +31,8 @@ import {
 import Link from "next/link";
 import { Switch } from "../ui/switch";
 
+const REVENUE_GROWTH_YEARS = 10;
+
 const userDCFInputSchema = z.object({
   revenues: z.coerce.number(),
   revenue_growth_rate_next_year: z.coerce.number(),
@@ -38,6 +41,7 @@ const userDCFInputSchema = z.object({
   target_pre_tax_operating_margin: z.coerce.number(),
   year_of_convergence_for_margin: z.coerce.number().min(0).max(10),
   discount_rate: z.coerce.number(),
+  revenue_growth_rates: z.array(z.coerce.number()).length(REVENUE_GROWTH_YEARS),
   years_of_high_growth: z.coerce.number().min(0).max(10),
   sales_to_capital_ratio_early: z.coerce.number(),
   sales_to_capital_ratio_steady: z.coerce.number(),
@@ -47,7 +51,7 @@ const userDCFInputSchema = z.object({
 });
 
 type UserDCFFormValues = z.infer<typeof userDCFInputSchema>;
-type NumericFieldKey = Exclude<keyof UserDCFFormValues, "adjust_r_and_d">;
+type NumericFieldKey = Exclude<keyof UserDCFFormValues, "adjust_r_and_d" | "revenue_growth_rates">;
 
 type FieldValue = {
   displayLabel: string;
@@ -68,37 +72,56 @@ function InputForm({
   forecastContext?: ForecastContext;
 }) {
   const router = useRouter();
+  const formDefaults = useMemo(() => {
+    const revenueGrowthDefaults = Array.from({ length: REVENUE_GROWTH_YEARS }, (_, index) => {
+      const year = index + 1;
+      const fallback = year === 1
+        ? defaults.revenue_growth_rate_next_year
+        : defaults.compounded_annual_revenue_growth_rate;
+      return (defaults.revenue_growth_rates?.[year] ?? fallback) * 100;
+    });
 
-  let formDefaults: UserDCFInputs = {
-    revenues: defaults.revenues / 1e6,
-    revenue_growth_rate_next_year: defaults.revenue_growth_rate_next_year * 100,
-    operating_margin_next_year: defaults.operating_margin_next_year * 100,
-    compounded_annual_revenue_growth_rate:
-      defaults.compounded_annual_revenue_growth_rate * 100,
-    target_pre_tax_operating_margin:
-      defaults.target_pre_tax_operating_margin * 100,
-    year_of_convergence_for_margin: defaults.year_of_convergence_for_margin,
-    discount_rate: defaults.discount_rate * 100,
-    years_of_high_growth: defaults.years_of_high_growth,
-    sales_to_capital_ratio_early: defaults.sales_to_capital_ratio_early,
-    sales_to_capital_ratio_steady: defaults.sales_to_capital_ratio_steady,
-    prob_of_failure: defaults.prob_of_failure * 100,
-    value_of_options: defaults.value_of_options / 1e6,
-    adjust_r_and_d: defaults.adjust_r_and_d,
-  };
-  formDefaults = Object.fromEntries(
-    Object.entries(formDefaults).map(([key, value]) => {
-      if (typeof value === "number") {
-        return [key, parseFloat(value.toFixed(2))];
-      }
-      return [key, value];
-    })
-  ) as UserDCFInputs;
+    const values: UserDCFInputs = {
+      revenues: defaults.revenues / 1e6,
+      revenue_growth_rate_next_year: defaults.revenue_growth_rate_next_year * 100,
+      operating_margin_next_year: defaults.operating_margin_next_year * 100,
+      compounded_annual_revenue_growth_rate:
+        defaults.compounded_annual_revenue_growth_rate * 100,
+      target_pre_tax_operating_margin:
+        defaults.target_pre_tax_operating_margin * 100,
+      year_of_convergence_for_margin: defaults.year_of_convergence_for_margin,
+      discount_rate: defaults.discount_rate * 100,
+      revenue_growth_rates: revenueGrowthDefaults,
+      years_of_high_growth: defaults.years_of_high_growth,
+      sales_to_capital_ratio_early: defaults.sales_to_capital_ratio_early,
+      sales_to_capital_ratio_steady: defaults.sales_to_capital_ratio_steady,
+      prob_of_failure: defaults.prob_of_failure * 100,
+      value_of_options: defaults.value_of_options / 1e6,
+      adjust_r_and_d: defaults.adjust_r_and_d,
+    };
+
+    return Object.fromEntries(
+      Object.entries(values).map(([key, value]) => {
+        if (typeof value === "number") {
+          return [key, parseFloat(value.toFixed(2))];
+        }
+        if (Array.isArray(value)) {
+          return [key, value.map((item) => parseFloat(item.toFixed(2)))];
+        }
+        return [key, value];
+      })
+    ) as UserDCFInputs;
+  }, [defaults]);
 
   const form = useForm<UserDCFFormValues>({
     resolver: zodResolver(userDCFInputSchema),
     defaultValues: formDefaults,
   });
+  const { reset } = form;
+
+  useEffect(() => {
+    reset(formDefaults as UserDCFFormValues);
+  }, [reset, formDefaults]);
 
   const consensusRevenues = forecastContext?.consensus_revenues ?? {};
   const consensusEbit = forecastContext?.consensus_ebit ?? {};
@@ -424,15 +447,29 @@ function InputForm({
 
   function onSubmit(values: z.infer<typeof userDCFInputSchema>, e: any) {
     e.preventDefault();
-    const newValues = { ...defaults, ...values };
-    const encodedValues = Object.entries(newValues).map(([key, value]) => {
-      const field = allFields.find((field) => field.key === key);
-      return [key, field ? field.decodeFn(String(value)) : value];
-    });
-    router.push(`?inputs=${encodeInputs(Object.fromEntries(encodedValues))}?`);
+
+    const encodedValues = Object.fromEntries(
+      Object.entries({ ...defaults, ...values })
+        .filter(([key]) => key !== "revenue_growth_rates")
+        .map(([key, value]) => {
+          const field = allFields.find((field) => field.key === key);
+          return [key, field ? field.decodeFn(String(value)) : value];
+        })
+    );
+    const revenuePathChanged = !!form.formState.dirtyFields.revenue_growth_rates;
+    if (revenuePathChanged) {
+      encodedValues.revenue_growth_rates = [
+        0,
+        ...values.revenue_growth_rates.map((value) => value / 100),
+        defaults.revenue_growth_rates?.[11] ?? defaults.risk_free_rate,
+      ];
+      encodedValues.revenue_growth_rate_next_year = encodedValues.revenue_growth_rates[1];
+      encodedValues.compounded_annual_revenue_growth_rate =
+        encodedValues.revenue_growth_rates.slice(1, 6).reduce((sum: number, rate: number) => sum + rate, 0) / 5;
+    }
+    router.push(`?inputs=${encodeInputs(encodedValues as UserDCFInputs)}?`);
   }
   const baseUrl = usePathname();
-  const { reset } = form;
   return (
     <>
       <Accordion
@@ -470,6 +507,40 @@ function InputForm({
                       Advanced
                     </AccordionTrigger>
                     <AccordionContent className="space-y-3 pt-2">
+                      <div className="space-y-3 py-1">
+                        <div className="flex items-center justify-between gap-4">
+                          <div className="flex items-center gap-1.5">
+                            <FormLabel className="text-xs leading-snug">Revenue Growth by Year %</FormLabel>
+                            <InfoHover text="Override revenue growth one forecast year at a time. Year 1 is the next twelve months." />
+                          </div>
+                          <span className="text-[10px] text-muted-foreground/50">Year-over-year</span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-5">
+                          {formDefaults.revenue_growth_rates?.map((value, index) => (
+                            <FormField
+                              key={index}
+                              control={form.control}
+                              name={`revenue_growth_rates.${index}`}
+                              render={({ field }) => (
+                                <FormItem className="space-y-1">
+                                  <FormLabel className="text-[10px] text-muted-foreground/60">
+                                    {index === 0 ? "Year 1 (NTM)" : `Year ${index + 1}`}
+                                  </FormLabel>
+                                  <FormControl>
+                                    <Input
+                                      {...field}
+                                      className="h-8 text-right"
+                                      placeholder={value.toFixed(2)}
+                                      value={field.value}
+                                    />
+                                  </FormControl>
+                                  <FormMessage className="text-xxs" />
+                                </FormItem>
+                              )}
+                            />
+                          ))}
+                        </div>
+                      </div>
                       {advancedFields.map((item: FieldValue) =>
                         renderInputField(item),
                       )}
@@ -501,19 +572,7 @@ function InputForm({
                   </AccordionItem>
                 </Accordion>
                 <div className="flex justify-end gap-3 pt-5">
-                  <Button
-                    onClick={() => {
-                      reset(
-                        Object.fromEntries(
-                          Object.entries(formDefaults).map(([key, value]) => {
-                            return [key, value];
-                          })
-                        )
-                      );
-                    }}
-                    variant="outline"
-                    size="sm"
-                  >
+                  <Button asChild variant="outline" size="sm">
                     <Link href={baseUrl}>Revert</Link>
                   </Button>
                   <Button type="submit" variant="outline" size="sm">

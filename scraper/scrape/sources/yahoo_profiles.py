@@ -164,7 +164,7 @@ def get_ttm_financials(ticker, yahoo_snapshot=None, fx_rates=None, sec_financial
 
         result = with_ttm_defaults(sec_financials)
         if quarterly_income_stmt.empty:
-            logger.warning("%s Yahoo quarterly income statement unavailable; using SEC TTM where available", ticker)
+            logger.debug("%s Yahoo quarterly income statement unavailable; using SEC TTM where available", ticker)
             return result
 
         most_recent_quarter = quarterly_income_stmt.columns[0]

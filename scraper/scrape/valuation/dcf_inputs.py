@@ -161,6 +161,51 @@ def _future_result(future, cancel_event):
             continue
 
 
+def _get_marketscreener_inputs(symbol, url, country, revenues, marketscreener_executor=None, cancel_event=None):
+    if not url:
+        if not country:
+            raise ValueError(f"{symbol} regional revenue unavailable and company country missing")
+        error = f"No MarketScreener URL for {symbol}"
+        logger.warning("%s regional revenue unavailable; using country fallback: %s", symbol, error)
+        return {country: revenues if revenues else 1}, {}, f"ValueError: {error}"
+
+    executor = marketscreener_executor or concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    should_shutdown_executor = marketscreener_executor is None
+    regional_revenues_future = None
+    forecast_defaults_future = None
+    try:
+        regional_revenues_future = executor.submit(get_revenue_by_region, symbol, url, cancel_event)
+        forecast_defaults_future = executor.submit(get_revenue_forecasts, url, cancel_event)
+
+        try:
+            regional_revenues = _future_result(regional_revenues_future, cancel_event)
+        except Exception as e:
+            raise_if_cancelled(cancel_event, _CANCELLED)
+            if not country:
+                raise ValueError(f"{symbol} regional revenue unavailable and company country missing") from e
+            logger.warning("%s regional revenue unavailable; using country fallback: %s", symbol, e)
+            regional_revenues = {country: revenues if revenues else 1}
+
+        forecast_error = None
+        try:
+            forecast_defaults = _future_result(forecast_defaults_future, cancel_event)
+        except Exception as e:
+            raise_if_cancelled(cancel_event, _CANCELLED)
+            forecast_error = f"{type(e).__name__}: {e}"
+            logger.debug("%s revenue forecasts unavailable; skipping DCF DB update: %s", symbol, e)
+            forecast_defaults = {}
+    finally:
+        if cancel_event is not None and cancel_event.is_set():
+            if regional_revenues_future is not None:
+                regional_revenues_future.cancel()
+            if forecast_defaults_future is not None:
+                forecast_defaults_future.cancel()
+        if should_shutdown_executor:
+            executor.shutdown()
+
+    return regional_revenues, forecast_defaults, forecast_error
+
+
 def _with_yahoo_retries(label, func, *, financial_endpoint: bool = False, cancel_event=None):
     for attempt in range(YAHOO.retry.attempts):
         try:
@@ -252,6 +297,114 @@ def r_and_d_handler(income_statement: pd.DataFrame, industry: str):
     return expenses
 
 
+def _get_forecast_metrics(
+    forecast_defaults,
+    info,
+    quarterly_income_statement,
+    fx_rate,
+    fx_rates,
+    revenues,
+    operating_margin_this_year,
+    marketscreener_forecast_error,
+    cancel_event,
+):
+    forecast_fx_rate = _usd_fx_rate(forecast_defaults.get("currency") or info.get("financialCurrency"), fx_rates, cancel_event)
+    consensus_revenues_usd = {
+        year: value * forecast_fx_rate
+        for year, value in forecast_defaults.get("consensus_revenues", {}).items()
+    }
+    consensus_ebit_usd = {
+        year: value * forecast_fx_rate
+        for year, value in forecast_defaults.get("consensus_ebit", {}).items()
+    }
+    fiscal_bridge_context = build_fiscal_bridge_context(info, quarterly_income_statement, fx_rate)
+    current_fiscal_year = None
+    next_fiscal_year = None
+    bridged_ntm_revenue = None
+    bridged_ntm_operating_income = None
+    rolling_ntm_revenues = []
+    revenue_growth_rate_next_year = forecast_defaults.get("revenue_growth_rate_next_year", 0)
+    if fiscal_bridge_context:
+        current_fiscal_year = fiscal_bridge_context["current_fiscal_year"]
+        next_fiscal_year = fiscal_bridge_context["next_fiscal_year"]
+        current_fiscal_year_consensus = consensus_revenues_usd.get(current_fiscal_year)
+        next_fiscal_year_consensus = consensus_revenues_usd.get(next_fiscal_year)
+        bridged_ntm_revenue = bridge_fiscal_year_values(
+            current_fiscal_year_consensus,
+            next_fiscal_year_consensus,
+            fiscal_bridge_context["actual_ytd_revenue"],
+            fiscal_bridge_context["next_fiscal_year_weight"],
+            clamp_remaining=True,
+        )
+        if bridged_ntm_revenue and revenues:
+            revenue_growth_rate_next_year = bridged_ntm_revenue / revenues - 1
+        rolling_ntm_revenues = build_rolling_ntm_revenue_path(consensus_revenues_usd, fiscal_bridge_context)
+    else:
+        next_fiscal_year = str(datetime.datetime.now().year + 1)
+        next_fiscal_year_consensus = consensus_revenues_usd.get(next_fiscal_year)
+        if next_fiscal_year_consensus and revenues:
+            revenue_growth_rate_next_year = next_fiscal_year_consensus / revenues - 1
+
+    post_bridge_years = sorted(
+        [year for year in consensus_revenues_usd if int(year) >= int(next_fiscal_year)],
+        key=int,
+    )
+    post_bridge_growth_rates = []
+    for previous_year, later_year in zip(post_bridge_years, post_bridge_years[1:]):
+        previous_value = consensus_revenues_usd.get(previous_year, 0)
+        later_value = consensus_revenues_usd.get(later_year, 0)
+        if previous_value:
+            post_bridge_growth_rates.append(later_value / previous_value - 1)
+
+    rolling_ntm_growth_rates = []
+    for current_value, next_value in zip(rolling_ntm_revenues, rolling_ntm_revenues[1:]):
+        if current_value:
+            rolling_ntm_growth_rates.append(next_value / current_value - 1)
+    compounded_annual_revenue_growth_rate = (
+        float(np.mean(rolling_ntm_growth_rates))
+        if rolling_ntm_growth_rates
+        else float(np.mean(post_bridge_growth_rates))
+        if post_bridge_growth_rates
+        else forecast_defaults.get("compounded_annual_revenue_growth_rate", 0)
+    )
+
+    operating_margin_next_year = forecast_defaults.get("operating_margin_next_year", 0)
+    if fiscal_bridge_context:
+        current_fiscal_year_consensus_ebit = consensus_ebit_usd.get(current_fiscal_year)
+        next_fiscal_year_consensus_ebit = consensus_ebit_usd.get(next_fiscal_year)
+        bridged_ntm_operating_income = bridge_fiscal_year_values(
+            current_fiscal_year_consensus_ebit,
+            next_fiscal_year_consensus_ebit,
+            fiscal_bridge_context["actual_ytd_operating_income"],
+            fiscal_bridge_context["next_fiscal_year_weight"],
+        )
+        if bridged_ntm_operating_income is not None and bridged_ntm_revenue not in (None, 0):
+            operating_margin_next_year = bridged_ntm_operating_income / bridged_ntm_revenue
+    operating_margin_next_year = max(operating_margin_next_year, operating_margin_this_year)
+
+    return {
+        "revenue_growth_rate_next_year": revenue_growth_rate_next_year,
+        "operating_margin_next_year": operating_margin_next_year,
+        "compounded_annual_revenue_growth_rate": compounded_annual_revenue_growth_rate,
+        "context": {
+            "consensus_revenues": consensus_revenues_usd,
+            "consensus_ebit": consensus_ebit_usd,
+            "ms_growth_next_year": forecast_defaults.get("revenue_growth_rate_next_year", 0),
+            "ms_margin_next_year": forecast_defaults.get("operating_margin_next_year", 0),
+            "current_fiscal_year": current_fiscal_year,
+            "next_fiscal_year": next_fiscal_year,
+            "quarters_reported": fiscal_bridge_context["quarters_reported"] if fiscal_bridge_context else None,
+            "actual_ytd_revenue": fiscal_bridge_context["actual_ytd_revenue"] if fiscal_bridge_context else None,
+            "actual_ytd_operating_income": fiscal_bridge_context["actual_ytd_operating_income"] if fiscal_bridge_context else None,
+            "next_fiscal_year_weight": fiscal_bridge_context["next_fiscal_year_weight"] if fiscal_bridge_context else None,
+            "bridged_ntm_revenue": bridged_ntm_revenue,
+            "bridged_ntm_operating_income": bridged_ntm_operating_income,
+            "rolling_ntm_revenues": rolling_ntm_revenues,
+            "marketscreener_forecast_error": marketscreener_forecast_error,
+        },
+    }
+
+
 def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper, avg_metrics: dict, industry_mapper: StringMapper, mature_erp: float, risk_free_rate: float, fx_rates: dict, yahoo_snapshot=None, marketscreener_executor=None, cancel_event=None):
     average_maturity = 5
     marginal_tax_rate = 0.21
@@ -337,38 +490,14 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     marketscreener_url = get_marketscreener_url(symbol, info.get("shortName") or info.get("longName") or "", cancel_event)
     raise_if_cancelled(cancel_event, _CANCELLED)
 
-    executor = marketscreener_executor or concurrent.futures.ThreadPoolExecutor(max_workers=2)
-    should_shutdown_executor = marketscreener_executor is None
-    regional_revenues_future = None
-    forecast_defaults_future = None
-    try:
-        regional_revenues_future = executor.submit(get_revenue_by_region, symbol, marketscreener_url, cancel_event)
-        forecast_defaults_future = executor.submit(get_revenue_forecasts, marketscreener_url, cancel_event)
-
-        try:
-            regional_revenues = _future_result(regional_revenues_future, cancel_event)
-        except Exception as e:
-            raise_if_cancelled(cancel_event, _CANCELLED)
-            if not country:
-                raise ValueError(f"{symbol} regional revenue unavailable and company country missing") from e
-            logger.warning("%s regional revenue unavailable; using country fallback: %s", symbol, e)
-            regional_revenues = {country: revenues if revenues else 1}
-        marketscreener_forecast_error = None
-        try:
-            forecast_defaults = _future_result(forecast_defaults_future, cancel_event)
-        except Exception as e:
-            raise_if_cancelled(cancel_event, _CANCELLED)
-            marketscreener_forecast_error = f"{type(e).__name__}: {e}"
-            logger.warning("%s revenue forecasts unavailable; skipping DCF DB update: %s", symbol, e)
-            forecast_defaults = {}
-    finally:
-        if cancel_event is not None and cancel_event.is_set():
-            if regional_revenues_future is not None:
-                regional_revenues_future.cancel()
-            if forecast_defaults_future is not None:
-                forecast_defaults_future.cancel()
-        if should_shutdown_executor:
-            executor.shutdown()
+    regional_revenues, forecast_defaults, marketscreener_forecast_error = _get_marketscreener_inputs(
+        symbol,
+        marketscreener_url,
+        country,
+        revenues,
+        marketscreener_executor,
+        cancel_event,
+    )
 
     equity_risk_premium, mapped_regional_revenues = get_regional_crps(regional_revenues, region_mapper, country_erps)
     equity_risk_premium += mature_erp
@@ -378,78 +507,18 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     target_pre_tax_operating_margin = avg_metrics["Pre-tax Operating Margin (Unadjusted)"].get(industry, 0)
 
     operating_margin_this_year = info.get("operatingMargins", operating_income_ttm / revenues if revenues else 0)
-    forecast_fx_rate = _usd_fx_rate(forecast_defaults.get("currency") or curr_currency, fx_rates, cancel_event)
-    consensus_revenues_usd = {
-        year: value * forecast_fx_rate
-        for year, value in forecast_defaults.get("consensus_revenues", {}).items()
-    }
-    consensus_ebit_usd = {
-        year: value * forecast_fx_rate
-        for year, value in forecast_defaults.get("consensus_ebit", {}).items()
-    }
-    fiscal_bridge_context = build_fiscal_bridge_context(info, quarterly_income_statement, fx_rate)
-    current_fiscal_year = None
-    next_fiscal_year = None
-    bridged_ntm_revenue = None
-    bridged_ntm_operating_income = None
-    rolling_ntm_revenues = []
-    revenue_growth_rate_next_year = forecast_defaults.get("revenue_growth_rate_next_year", 0)
-    if fiscal_bridge_context:
-        current_fiscal_year = fiscal_bridge_context["current_fiscal_year"]
-        next_fiscal_year = fiscal_bridge_context["next_fiscal_year"]
-        current_fiscal_year_consensus = consensus_revenues_usd.get(current_fiscal_year)
-        next_fiscal_year_consensus = consensus_revenues_usd.get(next_fiscal_year)
-        bridged_ntm_revenue = bridge_fiscal_year_values(
-            current_fiscal_year_consensus,
-            next_fiscal_year_consensus,
-            fiscal_bridge_context["actual_ytd_revenue"],
-            fiscal_bridge_context["next_fiscal_year_weight"],
-            clamp_remaining=True,
-        )
-        if bridged_ntm_revenue and revenues:
-            revenue_growth_rate_next_year = bridged_ntm_revenue / revenues - 1
-        rolling_ntm_revenues = build_rolling_ntm_revenue_path(consensus_revenues_usd, fiscal_bridge_context)
-    else:
-        next_fiscal_year = str(datetime.datetime.now().year + 1)
-        next_fiscal_year_consensus = consensus_revenues_usd.get(next_fiscal_year)
-        if next_fiscal_year_consensus and revenues:
-            revenue_growth_rate_next_year = next_fiscal_year_consensus / revenues - 1
-
-    post_bridge_years = sorted(
-        [year for year in consensus_revenues_usd if int(year) >= int(next_fiscal_year)],
-        key=int,
+    forecast_metrics = _get_forecast_metrics(
+        forecast_defaults,
+        info,
+        quarterly_income_statement,
+        fx_rate,
+        fx_rates,
+        revenues,
+        operating_margin_this_year,
+        marketscreener_forecast_error,
+        cancel_event,
     )
-    post_bridge_growth_rates = []
-    for previous_year, later_year in zip(post_bridge_years, post_bridge_years[1:]):
-        previous_value = consensus_revenues_usd.get(previous_year, 0)
-        later_value = consensus_revenues_usd.get(later_year, 0)
-        if previous_value:
-            post_bridge_growth_rates.append(later_value / previous_value - 1)
-
-    rolling_ntm_growth_rates = []
-    for current_value, next_value in zip(rolling_ntm_revenues, rolling_ntm_revenues[1:]):
-        if current_value:
-            rolling_ntm_growth_rates.append(next_value / current_value - 1)
-    compounded_annual_revenue_growth_rate = (
-        float(np.mean(rolling_ntm_growth_rates))
-        if rolling_ntm_growth_rates
-        else float(np.mean(post_bridge_growth_rates))
-        if post_bridge_growth_rates
-        else forecast_defaults.get("compounded_annual_revenue_growth_rate", 0)
-    )
-    operating_margin_next_year = forecast_defaults.get("operating_margin_next_year", 0)
-    if fiscal_bridge_context:
-        current_fiscal_year_consensus_ebit = consensus_ebit_usd.get(current_fiscal_year)
-        next_fiscal_year_consensus_ebit = consensus_ebit_usd.get(next_fiscal_year)
-        bridged_ntm_operating_income = bridge_fiscal_year_values(
-            current_fiscal_year_consensus_ebit,
-            next_fiscal_year_consensus_ebit,
-            fiscal_bridge_context["actual_ytd_operating_income"],
-            fiscal_bridge_context["next_fiscal_year_weight"],
-        )
-        if bridged_ntm_operating_income is not None and bridged_ntm_revenue not in (None, 0):
-            operating_margin_next_year = bridged_ntm_operating_income / bridged_ntm_revenue
-    operating_margin_next_year = max(operating_margin_next_year, operating_margin_this_year)
+    operating_margin_next_year = forecast_metrics["operating_margin_next_year"]
     target_pre_tax_operating_margin = max(target_pre_tax_operating_margin, operating_margin_next_year)
     year_of_convergence_for_margin = 5
     years_of_high_growth = 5
@@ -467,7 +536,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
             )
         r_and_d_expenses = r_and_d_handler(annual_income_stmt, industry)
     except Exception as e:
-        logger.warning("%s R&D expense unavailable; using empty history: %s", symbol, e)
+        logger.debug("%s R&D expense unavailable; using empty history: %s", symbol, e)
         r_and_d_expenses = []
     return {
         "dcf_inputs": {
@@ -492,9 +561,9 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
             "average_maturity": average_maturity,
             "prob_of_failure": prob_of_failure,
             "value_of_options": value_of_options,
-            "revenue_growth_rate_next_year": revenue_growth_rate_next_year,
+            "revenue_growth_rate_next_year": forecast_metrics["revenue_growth_rate_next_year"],
             "operating_margin_next_year": operating_margin_next_year,
-            "compounded_annual_revenue_growth_rate": compounded_annual_revenue_growth_rate,
+            "compounded_annual_revenue_growth_rate": forecast_metrics["compounded_annual_revenue_growth_rate"],
             "target_pre_tax_operating_margin": target_pre_tax_operating_margin,
             "year_of_convergence_for_margin": year_of_convergence_for_margin,
             "years_of_high_growth": years_of_high_growth,
@@ -507,22 +576,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
                 "mapped_regional_revenues": mapped_regional_revenues,
                 "research_and_development": r_and_d_expenses,
                 "last_updated_financials": ttm_columns[0].strftime("%Y-%m-%d"),
-                "forecast_context": {
-                    "consensus_revenues": consensus_revenues_usd,
-                    "consensus_ebit": consensus_ebit_usd,
-                    "ms_growth_next_year": forecast_defaults.get("revenue_growth_rate_next_year", 0),
-                    "ms_margin_next_year": forecast_defaults.get("operating_margin_next_year", 0),
-                    "current_fiscal_year": current_fiscal_year,
-                    "next_fiscal_year": next_fiscal_year,
-                    "quarters_reported": fiscal_bridge_context["quarters_reported"] if fiscal_bridge_context else None,
-                    "actual_ytd_revenue": fiscal_bridge_context["actual_ytd_revenue"] if fiscal_bridge_context else None,
-                    "actual_ytd_operating_income": fiscal_bridge_context["actual_ytd_operating_income"] if fiscal_bridge_context else None,
-                    "next_fiscal_year_weight": fiscal_bridge_context["next_fiscal_year_weight"] if fiscal_bridge_context else None,
-                    "bridged_ntm_revenue": bridged_ntm_revenue,
-                    "bridged_ntm_operating_income": bridged_ntm_operating_income,
-                    "rolling_ntm_revenues": rolling_ntm_revenues,
-                    "marketscreener_forecast_error": marketscreener_forecast_error,
-                },
+                "forecast_context": forecast_metrics["context"],
             },
         },
         "yahoo_profile": yahoo_profile,

@@ -140,7 +140,7 @@ def get_marketscreener_url(ticker, name: str = "", cancel_event=None):
             break
 
     if not found_link:
-        logger.warning("Could not find %s on MarketScreener", ticker)
+        logger.debug("Could not find %s on MarketScreener", ticker)
         return None
 
     with JSON_LOCK:

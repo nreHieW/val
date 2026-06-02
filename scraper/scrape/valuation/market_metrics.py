@@ -17,13 +17,16 @@ def get_exchange_rates():
             fx_rates[currency] = 1.0
             continue
         yahoo_pair = currency + "USD=X"
-        history = YahooQueryTicker(yahoo_pair).history(period="5d")
+        try:
+            history = YahooQueryTicker(yahoo_pair).history(period="5d")
+        except Exception as e:
+            logger.warning("Missing FX rate for %s via Yahoo Finance: %s", yahoo_pair, e)
+            continue
         close = yahooquery_close_series(history)
         if close.empty:
             logger.warning("Missing FX rate for %s via Yahoo Finance", yahoo_pair)
-            fx_rates[currency] = 1.0
-        else:
-            fx_rates[currency] = close.iloc[-1].item()
+            continue
+        fx_rates[currency] = close.iloc[-1].item()
     return fx_rates
 
 

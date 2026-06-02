@@ -30,7 +30,9 @@ from scrape.valuation.string_mapper import StringMapper
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(levelname)s: %(message)s")
 logging.getLogger("yahooquery").setLevel(logging.WARNING)
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+_DCF_PROGRESS_INTERVAL_BATCHES = 5
 
 
 def _log_timing(label, fn, *args, **kwargs):
@@ -189,7 +191,8 @@ def run_dcf_scrape(tickers, client, yahoo_snapshots=None):
                         failure_counts[failure_reason] += 1
 
             while next_batch_to_log <= total_batches and completed_tickers >= (next_batch_to_log - 1) * DCF_MAX_WORKERS:
-                _log_dcf_progress(next_batch_to_log, total_batches, completed_tickers, len(tickers), processing_started)
+                if next_batch_to_log % _DCF_PROGRESS_INTERVAL_BATCHES == 0 or next_batch_to_log == total_batches:
+                    _log_dcf_progress(next_batch_to_log, total_batches, completed_tickers, len(tickers), processing_started)
                 if next_batch_to_log % 25 == 0:
                     log_marketscreener_stats()
                 next_batch_to_log += 1
@@ -377,7 +380,7 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
         logger.warning("DCF scrape timed out for %s", ticker)
         return False, None, None, None, "timeout"
     except MissingFinancialStatements:
-        logger.warning("DCF scrape skipped for %s: missing financial statements", ticker)
+        logger.debug("DCF scrape skipped for %s: missing financial statements", ticker)
         return False, None, None, None, "skipped:missing_financial_statements"
     except Exception as e:
         failure_reason = _log_ticker_exception("DCF scrape", ticker, e)

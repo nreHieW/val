@@ -8,6 +8,8 @@ from scrape.sources.yahooquery_adapter import YahooQueryTicker, yahooquery_close
 from scrape.valuation.string_mapper import StringMapper
 
 logger = logging.getLogger(__name__)
+_INDUSTRY_MIN_SCORE = 0.7
+_INDUSTRY_MIN_MARGIN = 0.05
 
 
 def get_exchange_rates():
@@ -52,15 +54,15 @@ def get_regional_crps(revenues_by_region: dict, mapper: StringMapper, country_er
     return sum(x * y for x, y in zip(crps, weights)), {final_mappings[region]: v for region, v in revenues_by_region.items()}
 
 
-def get_industry_beta(industry: str, sector: str, mapper: StringMapper, industry_betas: dict):
-    industry_result, industry_score = mapper.get_closest_with_scores(industry)[0]
-    sector_result, sector_score = mapper.get_closest_with_scores(sector)[0]
-    if industry_score is None and sector_score is None:
-        return industry_betas["Grand Total"], "Grand Total"
+def get_industry_beta(industry: str, mapper: StringMapper, industry_betas: dict):
+    industry_matches = mapper.get_closest_with_scores(industry, num_results=2)
+    if industry_matches:
+        industry_result, score = industry_matches[0]
+        next_score = industry_matches[1][1] if len(industry_matches) > 1 else 0
+        if score >= _INDUSTRY_MIN_SCORE and score - next_score >= _INDUSTRY_MIN_MARGIN:
+            return industry_betas[industry_result], industry_result
 
-    if industry_score > sector_score:
-        return industry_betas[industry_result], industry_result
-    return industry_betas[sector_result], sector_result
+    return industry_betas["Grand Total"], "Grand Total"
 
 
 def get_10year_tbill():

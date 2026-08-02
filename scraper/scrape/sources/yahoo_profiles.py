@@ -80,7 +80,7 @@ def normalize_quarterly_statement(statement: pd.DataFrame) -> pd.DataFrame:
     statement = statement.copy()
     statement = statement.loc[~statement.index.duplicated(keep="first")]
     ordered_columns = sorted(statement.columns, key=lambda column: pd.Timestamp(column), reverse=True)
-    return statement.loc[:, ordered_columns].fillna(0)
+    return statement.loc[:, ordered_columns]
 
 
 def sum_statement_metric(statement: pd.DataFrame, metric_names: list[str], start=0, count=4):

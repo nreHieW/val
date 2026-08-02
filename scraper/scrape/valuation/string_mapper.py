@@ -1,3 +1,4 @@
+import re
 from functools import lru_cache
 
 import numpy as np
@@ -6,7 +7,12 @@ from sentence_transformers import SentenceTransformer
 
 @lru_cache(maxsize=1)
 def _get_model():
-    return SentenceTransformer("Alibaba-NLP/gte-base-en-v1.5", trust_remote_code=True)
+    return SentenceTransformer(
+        "Alibaba-NLP/gte-base-en-v1.5",
+        revision="a829fd0e060bb84554da0dfd354d0de0f7712b7f",
+        trust_remote_code=True,
+        model_kwargs={"code_revision": "40ced75c3017eb27626c9d4ea981bde21a2662f4"},
+    )
 
 
 class StringMapper:
@@ -21,16 +27,18 @@ class StringMapper:
         return [gt for gt, _ in self.get_closest_with_scores(query, num_results)]
 
     def _word_match(self, query: str):
-        if query in self.gts or query.lower() in self.gts:
-            return query
+        def words(value):
+            normalized = []
+            for word in re.findall(r"[a-z0-9]+", value.lower()):
+                if len(word) > 3 and word.endswith("ies"):
+                    word = word[:-3] + "y"
+                elif len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+                    word = word[:-1]
+                normalized.append(word)
+            return set(normalized)
 
-        query_words = set(query.lower().split())
-        candidates = [
-            gt
-            for gt in self.gts
-            if any(len(word) >= 3 for word in query_words & set(gt.lower().split()))
-        ]
-        return min(candidates, key=lambda candidate: len(candidate.split())) if candidates else None
+        query_words = words(query)
+        return next((gt for gt in self.gts if words(gt) == query_words), None)
 
     def get_closest_with_scores(self, query: str, num_results=1, indices_to_adjust=None):
         return list(self._get_closest_with_scores(query, num_results, tuple(indices_to_adjust or ())))

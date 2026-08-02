@@ -18,7 +18,7 @@ from scrape.sources.marketscreener import load_marketscreener_cache, log_markets
 from scrape.sources.yahoo_market_discovery import get_sector_industries, get_similar_companies
 from scrape.sources.yahoo_profiles import compute_ttm_financials, get_and_parse_yahoo, prefetch_sec_ttm_financials
 from scrape.sources.yahoo_snapshot import get_yahoo_snapshots
-from scrape.valuation.dcf_inputs import MissingFinancialStatements, get_dcf_inputs
+from scrape.valuation.dcf_inputs import InvalidDCFInputs, MissingFinancialStatements, get_dcf_inputs
 from scrape.valuation.market_metrics import (
     get_10year_tbill,
     get_country_erp,
@@ -382,6 +382,9 @@ def process_ticker(ticker, country_erps, region_mapper, avg_metrics, industry_ma
     except MissingFinancialStatements:
         logger.debug("DCF scrape skipped for %s: missing financial statements", ticker)
         return False, None, None, None, "skipped:missing_financial_statements"
+    except InvalidDCFInputs as e:
+        logger.debug("DCF scrape skipped for %s: %s", ticker, e)
+        return False, None, None, None, f"skipped:invalid_dcf_inputs:{e}"
     except Exception as e:
         failure_reason = _log_ticker_exception("DCF scrape", ticker, e)
         return False, None, None, None, failure_reason

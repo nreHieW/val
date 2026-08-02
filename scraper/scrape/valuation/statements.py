@@ -5,7 +5,7 @@ import pandas as pd
 def get_statement_metric_series(statement: pd.DataFrame, metric_names: list[str]) -> pd.Series:
     for metric_name in metric_names:
         if metric_name in statement.index:
-            return pd.to_numeric(statement.loc[metric_name], errors="coerce").fillna(0)
+            return pd.to_numeric(statement.loc[metric_name], errors="coerce")
     return pd.Series(dtype=float)
 
 

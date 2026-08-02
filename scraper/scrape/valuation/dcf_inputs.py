@@ -33,6 +33,10 @@ class MissingFinancialStatements(ValueError):
     pass
 
 
+class InvalidDCFInputs(ValueError):
+    pass
+
+
 _CURRENCY_ALIASES = {
     "IN": "INR",
     "RS": "INR",
@@ -230,6 +234,40 @@ def _balance_sheet_scalar(df: pd.DataFrame, key: str, default: float = 0) -> flo
     return float(default) if pd.isna(val) else float(val)
 
 
+def _required_ttm_metric(statement: pd.DataFrame, names: list[str], columns: list, label: str) -> pd.Series:
+    if len(columns) < 4:
+        raise MissingFinancialStatements(f"insufficient_quarters:{label}")
+    series = get_statement_metric_series(statement, names).reindex(columns)
+    if series.isna().any():
+        raise MissingFinancialStatements(f"missing_quarterly_metric:{label}")
+    return series.astype(float)
+
+
+def validate_dcf_inputs(inputs: dict) -> None:
+    invalid_fields = [
+        field
+        for field, value in inputs.items()
+        if field not in {"name", "extras"} and (value is None or not np.isfinite(value))
+    ]
+    if invalid_fields:
+        raise InvalidDCFInputs(f"non_finite_fields:{','.join(invalid_fields)}")
+
+    if inputs["revenues"] <= 0:
+        raise InvalidDCFInputs("non_positive_revenues")
+    if inputs["number_of_shares_outstanding"] <= 0:
+        raise InvalidDCFInputs("non_positive_shares_outstanding")
+    if inputs["curr_price"] <= 0:
+        raise InvalidDCFInputs("non_positive_current_price")
+    if inputs["mature_erp"] == 0:
+        raise InvalidDCFInputs("zero_mature_erp")
+    if inputs["sales_to_capital_ratio_early"] == 0 or inputs["sales_to_capital_ratio_steady"] == 0:
+        raise InvalidDCFInputs("zero_sales_to_capital_ratio")
+
+    r_and_d_expenses = inputs.get("extras", {}).get("research_and_development", [])
+    if any(not np.isfinite(value) for value in r_and_d_expenses):
+        raise InvalidDCFInputs("non_finite_r_and_d_history")
+
+
 def _usd_fx_rate(currency: str | None, fx_rates: dict, cancel_event=None) -> float:
     raise_if_cancelled(cancel_event, _CANCELLED)
     if not currency:
@@ -289,8 +327,8 @@ def r_and_d_handler(income_statement: pd.DataFrame, industry: str):
         ["Research And Development", "Research Development"],
     )
     expenses = [float(value) for value in r_and_d_series.dropna().tolist() if value > 0]
-    if not expenses:
-        raise ValueError("No R&D expense history")
+    if len(expenses) < 2:
+        raise ValueError("At least two years of R&D expense history are required")
     num_years = _R_AND_D_AMORTIZATION_YEARS.get(industry, 3)
     num_years = min(len(expenses), num_years)
     expenses = np.array(expenses)[: num_years + 1]
@@ -428,6 +466,20 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
         raise MissingFinancialStatements(f"empty_quarterly_balance_sheet:{yahoo_ticker.ticker}")
     last_balance_sheet = last_balance_sheet[last_balance_sheet.columns[:4]].T.ffill().bfill()
     info = yahoo_snapshot.get_info() if yahoo_snapshot is not None else _with_yahoo_retries(yahoo_ticker.ticker + " info", yahoo_ticker.get_info, cancel_event=cancel_event)
+    shares_issued = _balance_sheet_scalar(last_balance_sheet, "Share Issued", np.nan)
+    treasury_shares = _balance_sheet_scalar(last_balance_sheet, "Treasury Shares Number", np.nan)
+    issued_less_treasury = shares_issued - treasury_shares if np.isfinite(shares_issued) and np.isfinite(treasury_shares) else np.nan
+    share_candidates = (
+        info.get("sharesOutstanding"),
+        _balance_sheet_scalar(last_balance_sheet, "Ordinary Shares Number", np.nan),
+        issued_less_treasury,
+    )
+    number_of_shares_outstanding = next(
+        (value for value in share_candidates if value is not None and np.isfinite(value) and value > 0),
+        None,
+    )
+    if number_of_shares_outstanding is None:
+        raise InvalidDCFInputs("missing_shares_outstanding")
 
     symbol = info.get("symbol") or yahoo_ticker.ticker
     yahoo_profile = build_yahoo_profile(symbol, info)
@@ -442,31 +494,35 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     if fx_rate != 1:
         last_balance_sheet = last_balance_sheet.apply(lambda x: x * fx_rate)
 
-    revenue_series = get_statement_metric_series(
+    revenue_series = _required_ttm_metric(
         quarterly_income_statement,
         ["Total Revenue", "Operating Revenue", "Revenue"],
-    ).reindex(ttm_columns, fill_value=0) * fx_rate
-    operating_income_series = get_statement_metric_series(
+        ttm_columns,
+        "revenue",
+    ) * fx_rate
+    operating_income_series = _required_ttm_metric(
         quarterly_income_statement,
         ["EBIT", "Operating Income"],
-    ).reindex(ttm_columns, fill_value=0) * fx_rate
+        ttm_columns,
+        "operating_income",
+    ) * fx_rate
     interest_expense_series = get_statement_metric_series(
         quarterly_income_statement,
         ["Interest Expense"],
-    ).reindex(ttm_columns, fill_value=0) * fx_rate
+    ).reindex(ttm_columns).fillna(0) * fx_rate
     pretax_income_series = get_statement_metric_series(
         quarterly_income_statement,
         ["Pretax Income"],
-    ).reindex(ttm_columns, fill_value=0) * fx_rate
+    ).reindex(ttm_columns).fillna(0) * fx_rate
     tax_rate_series = get_statement_metric_series(
         quarterly_income_statement,
         ["Tax Rate For Calcs"],
-    ).reindex(ttm_columns, fill_value=0)
+    ).reindex(ttm_columns).fillna(0)
 
     revenues = revenue_series.sum()
     operating_income_ttm = operating_income_series.sum()
     interest_expense = interest_expense_series.sum()
-    book_value_of_equity = _balance_sheet_scalar(last_balance_sheet, "Stockholders Equity")
+    book_value_of_equity = _balance_sheet_scalar(last_balance_sheet, "Stockholders Equity", np.nan)
     book_value_of_debt = _balance_sheet_scalar(last_balance_sheet, "Total Debt")
     cash_and_marketable_securities = _balance_sheet_scalar(
         last_balance_sheet, "Cash Cash Equivalents And Short Term Investments"
@@ -475,7 +531,6 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
         last_balance_sheet, "Investments And Advances"
     )
     minority_interest = _balance_sheet_scalar(last_balance_sheet, "Minority Interest")
-    number_of_shares_outstanding = info.get("sharesOutstanding", 0)
     curr_price = info.get("previousClose", 0)
     pretax_income_total = pretax_income_series.sum()
     effective_tax_rate = (tax_rate_series * pretax_income_series).sum() / pretax_income_total if pretax_income_total else 0
@@ -484,8 +539,9 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     region = region_mapper.get_closest(country)[0] if country else "Global"
 
     industry = info.get("industry") or info.get("sector") or "Grand Total"
-    sector = info.get("sector") or industry
-    unlevered_beta, industry = get_industry_beta(industry, sector, industry_mapper, avg_metrics["Unlevered Beta"])
+    if industry == "Shell Companies":
+        raise InvalidDCFInputs("unsupported_industry:shell_companies")
+    unlevered_beta, industry = get_industry_beta(industry, industry_mapper, avg_metrics["Unlevered Beta"])
     raise_if_cancelled(cancel_event, _CANCELLED)
     marketscreener_url = get_marketscreener_url(symbol, info.get("shortName") or info.get("longName") or "", cancel_event)
     raise_if_cancelled(cancel_event, _CANCELLED)
@@ -538,7 +594,7 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
     except Exception as e:
         logger.debug("%s R&D expense unavailable; using empty history: %s", symbol, e)
         r_and_d_expenses = []
-    return {
+    result = {
         "dcf_inputs": {
             "name": name,
             "revenues": revenues,
@@ -582,3 +638,5 @@ def get_dcf_inputs(ticker: str, country_erps: dict, region_mapper: StringMapper,
         "yahoo_profile": yahoo_profile,
         "yahoo_overview": yahoo_overview,
     }
+    validate_dcf_inputs(result["dcf_inputs"])
+    return result

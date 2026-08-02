@@ -15,7 +15,7 @@ export default async function TopCard({
 }: {
   ticker: string;
   name: string;
-  value_per_share: number;
+  value_per_share: number | null;
   final_components: {
     present_value_of_cash_flows: number;
     book_value_of_debt: number;
@@ -31,10 +31,11 @@ export default async function TopCard({
   }
   const currentPrice = priceHistory[priceHistory.length - 1];
   const startPrice = priceHistory[0];
-  let value = 0;
-  if (value_per_share) {
-    value = calculateValue(value_per_share, currentPrice);
-  }
+  const hasValuePerShare =
+    value_per_share !== null && Number.isFinite(value_per_share);
+  const value = hasValuePerShare
+    ? calculateValue(value_per_share, currentPrice)
+    : null;
   return (
     <div className="grid sm:grid-cols-[1fr_auto] gap-6 sm:gap-12">
       <div className="flex flex-col min-w-0">
@@ -59,11 +60,15 @@ export default async function TopCard({
       <div className="flex flex-col sm:w-64">
         <p className="text-xxs text-muted-foreground/60 uppercase tracking-wider">Value Per Share</p>
         <p className="text-2xl sm:text-3xl font-medium tracking-tight mt-1">
-          ${value_per_share.toFixed(2)}
+          {hasValuePerShare ? `$${value_per_share.toFixed(2)}` : "—"}
         </p>
 
         <p className="text-xs leading-relaxed mt-4 text-muted-foreground">
-          {value < 0 ? (
+          {value === null ? (
+            <span>
+              Intrinsic value is unavailable for the current assumptions.
+            </span>
+          ) : value < 0 ? (
             <span className="text-signal-negative">
               Negative value — review the business model assumptions.
             </span>

@@ -15,4 +15,4 @@ class CustomEncoder(json.JSONEncoder):
 
 
 def normalize_json(value):
-    return json.loads(json.dumps(value, cls=CustomEncoder))
+    return json.loads(json.dumps(value, cls=CustomEncoder, allow_nan=False))

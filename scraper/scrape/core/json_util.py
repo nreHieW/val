@@ -5,6 +5,8 @@ import numpy as np
 
 class CustomEncoder(json.JSONEncoder):
     def default(self, obj):
+        if isinstance(obj, np.bool_):
+            return bool(obj)
         if isinstance(obj, np.integer):
             return int(obj)
         if isinstance(obj, np.floating):
@@ -15,4 +17,4 @@ class CustomEncoder(json.JSONEncoder):
 
 
 def normalize_json(value):
-    return json.loads(json.dumps(value, cls=CustomEncoder, allow_nan=False))
+    return json.loads(json.dumps(value, cls=CustomEncoder), parse_constant=lambda _: None)

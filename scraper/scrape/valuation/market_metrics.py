@@ -62,7 +62,11 @@ def get_industry_beta(industry: str, mapper: StringMapper, industry_betas: dict)
         if score >= _INDUSTRY_MIN_SCORE and score - next_score >= _INDUSTRY_MIN_MARGIN:
             return industry_betas[industry_result], industry_result
 
-    return industry_betas["Grand Total"], "Grand Total"
+    # Damodaran renamed the aggregate row from Grand Total to Total Market.
+    for aggregate in ("Total Market", "Grand Total"):
+        if aggregate in industry_betas:
+            return industry_betas[aggregate], aggregate
+    raise ValueError("Industry averages are missing the Total Market / Grand Total row")
 
 
 def get_10year_tbill():
